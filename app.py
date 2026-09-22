@@ -38,16 +38,7 @@ def cargar_dat(file_bytes):
     )
 
     # Fecha/hora local del registro.
-    df["fecha_hora"] = pd.to_datetime(
-        dict(
-            year=df["year"],
-            month=df["mon"],
-            day=df["day"],
-            hour=df["hour"],
-            minute=df["min"],
-        ),
-        errors="coerce",
-    )
+    df["fecha_hora"] = pd.to_datetime(dict(year=df["year"], month=df["mon"], day=df["day"], hour=df["hour"], minute=df["min"]), errors="coerce") - pd.Timedelta(hours=6)
 
     # Valores usados por 3DPaws para indicar dato no disponible.
     for col in df.columns:
@@ -85,6 +76,25 @@ def rango_texto(df):
         return "Sin fechas válidas"
     return f"{t.min():%d/%m/%Y %H:%M} → {t.max():%d/%m/%Y %H:%M}"
 
+
+def calcular_hr_psicrometrica(df):
+    if "hum_temp" not in df.columns or "mcp9808" not in df.columns: return pd.Series(np.nan, index=df.index)
+    seco=pd.to_numeric(df["mcp9808"], errors="coerce"); hum=pd.to_numeric(df["hum_temp"], errors="coerce"); P=1013.25
+    es=lambda T: 6.112*np.exp((17.62*T)/(243.12+T))
+    e=es(hum)-0.00066*P*(seco-hum)
+    return (100*e/es(seco)).clip(0,100)
+
+def grafico_psicrometro(df):
+    fig,ax=plt.subplots(figsize=(12,4.8)); ax.plot(df["fecha_hora"],df["mcp9808"],label="Bulbo seco"); ax.plot(df["fecha_hora"],df["hum_temp"],label="Bulbo húmedo"); ax.set_ylabel("Temperatura (°C)"); ax.grid(True,alpha=.25); ax.set_title("Psicrómetro y humedad relativa calculada")
+    ax2=ax.twinx(); ax2.plot(df["fecha_hora"],df["HR_psicrometrica"],"--",label="HR psicrométrica"); ax2.set_ylabel("Humedad relativa (%)"); ax2.set_ylim(0,100); l1,a1=ax.get_legend_handles_labels(); l2,a2=ax2.get_legend_handles_labels(); ax.legend(l1+l2,a1+a2,loc="upper left"); fig.autofmt_xdate(); fig.tight_layout(); return fig
+
+def dibujar_pluviometro(valor_mm, capacidad=100):
+    fig,ax=plt.subplots(figsize=(4,6)); v=max(0,float(valor_mm)); n=min(v/capacidad,1); x0,x1,y0,y1=.3,.7,.08,.88
+    ax.add_patch(plt.Rectangle((x0,y0),x1-x0,y1-y0,fill=False,linewidth=2)); ax.add_patch(plt.Rectangle((x0,y0),x1-x0,(y1-y0)*n,alpha=.55)); ax.plot([x0-.04,x1+.04],[y1,y1],linewidth=3)
+    for mm in range(0,capacidad+1,10):
+        y=y0+(y1-y0)*mm/capacidad; ln=.07 if mm%20==0 else .045; ax.plot([x1,x1+ln],[y,y]);
+        if mm%20==0: ax.text(x1+ln+.025,y,str(mm),va="center",fontsize=9)
+    ax.text(.5,.96,"PLUVIÓGRAFO 3DPaws",ha="center",fontsize=13,fontweight="bold"); ax.text(.5,.02,f"Precipitación: {v:.1f} mm",ha="center",fontsize=12,fontweight="bold"); ax.set_xlim(.18,.95); ax.set_ylim(0,1.03); ax.axis("off"); fig.tight_layout(); return fig
 
 def grafico_linea(df, columnas, titulo, ylabel):
     fig, ax = plt.subplots(figsize=(12, 4.5))
@@ -158,6 +168,7 @@ if archivo is None:
     st.stop()
 
 df = cargar_dat(archivo.getvalue())
+df["HR_psicrometrica"] = calcular_hr_psicrometrica(df)
 
 # ---------------------------------------------------------------------
 # Información general
@@ -224,32 +235,11 @@ tabs = st.tabs([
 ])
 
 with tabs[0]:
-    cols = [c for c in ["bmp_temp", "hum_temp", "mcp9808"] if c in df]
-    st.pyplot(
-        grafico_linea(
-            df, cols,
-            "Temperatura de los sensores 3DPaws",
-            "Temperatura (°C)"
-        ),
-        use_container_width=True,
-    )
-
-    if len(cols) >= 2:
-        d = df[["fecha_hora"] + cols].copy()
-        d["Diferencia hum_temp - mcp9808 (°C)"] = d["hum_temp"] - d["mcp9808"]
-        st.write(
-            "La comparación entre `hum_temp` y `mcp9808` permite detectar "
-            "diferencias persistentes entre sensores de temperatura."
-        )
-        st.pyplot(
-            grafico_linea(
-                d.rename(columns={"Diferencia hum_temp - mcp9808 (°C)": "dif"}),
-                ["dif"],
-                "Diferencia entre sensores de temperatura",
-                "Diferencia (°C)",
-            ),
-            use_container_width=True,
-        )
+    st.pyplot(grafico_psicrometro(df), use_container_width=True)
+    st.info("La HR se estima psicrométricamente usando mcp9808 como bulbo seco, hum_temp como bulbo húmedo y 1013.25 hPa como presión estándar.")
+    hr=df["HR_psicrometrica"].dropna()
+    if not hr.empty:
+        c1,c2,c3=st.columns(3); c1.metric("HR media",f"{hr.mean():.1f} %"); c2.metric("HR mínima",f"{hr.min():.1f} %"); c3.metric("HR máxima",f"{hr.max():.1f} %")
 
 with tabs[1]:
     if "hum_hum" in df:
@@ -317,19 +307,16 @@ with tabs[4]:
 
 with tabs[5]:
     if "tipping" in df:
-        st.pyplot(
-            grafico_linea(
-                df, ["tipping"],
-                "Canal de precipitación / tipping bucket",
-                "Lectura acumulada o conteo",
-            ),
-            use_container_width=True,
-        )
-        st.info(
-            "La columna `tipping` se conserva como fue registrada. "
-            "Para convertirla a milímetros hace falta conocer la constante "
-            "de calibración del pluviómetro 3DPaws (mm por vuelco o pulsos)."
-        )
+        st.markdown("### Pluviógrafo / tipping bucket")
+        mm_por_vuelco=st.number_input("Milímetros por vuelco",min_value=0.01,value=0.254,step=0.001,format="%.3f")
+        precip=float(pd.to_numeric(df["tipping"],errors="coerce").max())*mm_por_vuelco
+        c1,c2=st.columns([1,2])
+        with c1: st.pyplot(dibujar_pluviometro(precip,100),use_container_width=True)
+        with c2:
+            fig,ax=plt.subplots(figsize=(10,4.8)); ax.plot(df["fecha_hora"],pd.to_numeric(df["tipping"],errors="coerce")*mm_por_vuelco); ax.set_title("Precipitación acumulada"); ax.set_xlabel("Fecha y hora"); ax.set_ylabel("mm"); ax.grid(True,alpha=.25); fig.autofmt_xdate(); fig.tight_layout(); st.pyplot(fig,use_container_width=True)
+        st.metric("Precipitación acumulada",f"{precip:.2f} mm")
+        st.warning("Se asume que tipping es un contador acumulado. Ajusta mm/vuelco a la calibración real del 3DPaws.")
+    else: st.warning("El archivo no contiene la columna tipping.")
 
 with tabs[6]:
     mostrar = st.multiselect(
