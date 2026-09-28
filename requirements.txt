@@ -2,3 +2,5 @@ streamlit
 pandas
 numpy
 matplotlib
+gdown>=6.0
+
