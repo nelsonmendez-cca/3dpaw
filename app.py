@@ -27,6 +27,23 @@ def cargar_dat(file_bytes):
         engine="python",
     )
 
+    # Normalizamos nombres de columnas: algunos .dat pueden traer
+    # espacios, BOM o mayúsculas. Así bt1/mt1/st1 se reconocen siempre.
+    df.columns = (
+        df.columns.astype(str)
+        .str.replace("\ufeff", "", regex=False)
+        .str.strip()
+        .str.lower()
+    )
+
+    # Convertimos las variables a numérico cuando corresponde.
+    # Esto evita que una columna de temperatura leída como texto
+    # termine sin dibujarse.
+    columnas_fecha = {"year", "mon", "day", "hour", "min"}
+    for col in df.columns:
+        if col not in columnas_fecha:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     # Fecha/hora ajustada a El Salvador (UTC-6 sin horario de verano)
     df["fecha_hora"] = (
         pd.to_datetime(
@@ -78,16 +95,46 @@ def rango_texto(df):
 # ---------------------------------------------------------------------
 def grafico_temperaturas(df):
     fig, ax = plt.subplots(figsize=(12, 4.5))
-    cols_temp = [c for c in ["bt1", "mt1", "st1"] if c in df.columns]
-    
-    for col in cols_temp:
-        ax.plot(df["fecha_hora"], df[col], linewidth=1.2, label=col)
-        
+
+    # Nombre oficial 3DPaws -> posibles nombres usados en archivos antiguos.
+    # Se mantiene bt1/mt1/st1 como etiqueta de salida.
+    alias_temp = {
+        "bt1": ["bt1", "bmx_t", "bmx_temp", "bmx_temperature"],
+        "mt1": ["mt1", "mcp9808", "mcp9808_t", "mcp9808_temp"],
+        "st1": ["st1", "sht31d", "sht31d_t", "sht31d_temp", "hum_temp"],
+    }
+
+    dibujadas = 0
+    for nombre_3dpaws, aliases in alias_temp.items():
+        encontrada = next((c for c in aliases if c in df.columns), None)
+        if encontrada is None:
+            continue
+
+        serie = pd.to_numeric(df[encontrada], errors="coerce")
+        mask = df["fecha_hora"].notna() & serie.notna()
+        if mask.any():
+            ax.plot(
+                df.loc[mask, "fecha_hora"],
+                serie.loc[mask],
+                linewidth=1.2,
+                label=nombre_3dpaws,
+            )
+            dibujadas += 1
+
     ax.set_title("Comparativa de Sensores de Temperatura (°C)")
     ax.set_xlabel("Fecha y hora (UTC-6)")
     ax.set_ylabel("Temperatura (°C)")
     ax.grid(True, alpha=.25)
-    ax.legend(loc="upper left")
+
+    if dibujadas:
+        ax.legend(loc="upper left")
+    else:
+        ax.text(
+            0.5, 0.5,
+            "No se encontraron datos numéricos de temperatura",
+            transform=ax.transAxes, ha="center", va="center",
+        )
+
     fig.autofmt_xdate()
     fig.tight_layout()
     return fig
@@ -344,6 +391,21 @@ tabs = st.tabs([
 
 with tabs[0]:
     st.pyplot(grafico_temperaturas(df), use_container_width=True)
+
+    # Diagnóstico visible: si el archivo trae nombres ligeramente distintos,
+    # aquí podemos comprobar qué variables de temperatura fueron detectadas.
+    candidatas_temp = [
+        c for c in df.columns
+        if any(p in c for p in ["bt1", "mt1", "st1", "bmx", "mcp9808", "sht31", "hum_temp"])
+    ]
+    if candidatas_temp:
+        st.caption("Variables de temperatura detectadas: " + ", ".join(candidatas_temp))
+    else:
+        st.warning(
+            "No se detectaron columnas de temperatura. "
+            "Revisa los nombres de las columnas del archivo .dat."
+        )
+
     if "dif_temp_sensores" in df:
         st.caption("Nota: La diferencia entre sensores permite identificar desfases por radiación o sesgo de calibración.")
 
