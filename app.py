@@ -195,14 +195,16 @@ def listar_archivos_drive():
 
     encontrados = []
     for item in archivos:
+        # gdown >= 6 devuelve objetos con id, path y local_path
+        # cuando se usa skip_download=True. Guardamos el ID para
+        # descargar SOLO el archivo seleccionado, no toda la carpeta.
         nombre = Path(getattr(item, "path", str(item))).name
-        local_path = Path(
-            getattr(item, "local_path", cache_dir / nombre)
-        )
-        if local_path.suffix.lower() in (".dat", ".txt"):
+        file_id = getattr(item, "id", None)
+
+        if Path(nombre).suffix.lower() in (".dat", ".txt"):
             encontrados.append({
                 "nombre": nombre,
-                "path": str(local_path),
+                "id": file_id,
             })
 
     return encontrados
@@ -226,22 +228,30 @@ def fecha_nombre_archivo(nombre):
 
 
 @st.cache_data(ttl=DRIVE_CACHE_TTL, show_spinner=False)
-def descargar_archivo_drive(path):
-    p = Path(path)
+def descargar_archivo_drive(file_id, nombre):
+    """Descarga únicamente el archivo seleccionado de Google Drive."""
+    cache_dir = Path(tempfile.gettempdir()) / "3dpaws_drive"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    destino = cache_dir / Path(nombre).name
 
-    if not p.exists():
-        cache_dir = p.parent
-        gdown.download_folder(
-            url=DRIVE_FOLDER_URL,
-            output=str(cache_dir),
+    if not destino.exists():
+        if not file_id:
+            raise RuntimeError(
+                f"Google Drive no devolvió el ID del archivo '{nombre}'. "
+                "Instala gdown>=6.0."
+            )
+
+        gdown.download(
+            id=file_id,
+            output=str(destino),
             quiet=True,
             use_cookies=False,
         )
 
-    if not p.exists():
-        raise FileNotFoundError(f"No se encontró el archivo: {p.name}")
+    if not destino.exists():
+        raise FileNotFoundError(f"No se pudo descargar: {nombre}")
 
-    return p.read_bytes()
+    return destino.read_bytes()
 
 
 try:
@@ -285,7 +295,10 @@ st.caption(
     f"{len(archivos_drive)} archivos disponibles"
 )
 
-df = cargar_dat(descargar_archivo_drive(archivo_info["path"]))
+with st.spinner(f"Descargando {seleccion} desde Google Drive..."):
+    datos_archivo = descargar_archivo_drive(archivo_info["id"], archivo_info["nombre"])
+
+df = cargar_dat(datos_archivo)
 
 # Información general
 st.subheader("Resumen del registro")
