@@ -452,7 +452,7 @@ with st.expander("🔍 Control de calidad de datos"):
 # Pestañas de análisis
 tabs = st.tabs([
     "Temperatura",
-    "Humedad Directa",
+    "Humedad Relativa",
     "Presión",
     "Radiación / Luz",
     "Viento",
@@ -483,9 +483,9 @@ with tabs[0]:
         st.caption("Nota: La diferencia entre sensores permite identificar desfases por radiación o sesgo de calibración.")
 
 with tabs[1]:
-    col_hum = [c for c in ["sh1"] if c in df.columns]
+    col_hum = [c for c in ["hum_hum"] if c in df.columns]
     if col_hum:
-        st.pyplot(grafico_linea(df, col_hum, "Humedad Relativa Medida por Sensor", "Humedad (%)"), use_container_width=True)
+        st.pyplot(grafico_linea(df, col_hum, "Humedad Relativa", "Humedad (%)"), use_container_width=True)
         h_ser = df[col_hum[0]].dropna()
         if not h_ser.empty:
             c1, c2, c3 = st.columns(3)
@@ -493,7 +493,7 @@ with tabs[1]:
             c2.metric("Humedad Mínima", f"{h_ser.min():.1f} %")
             c3.metric("Humedad Máxima", f"{h_ser.max():.1f} %")
     else:
-        st.warning("No se encontró columna de humedad en el archivo.")
+        st.warning("No se encontró la columna hum_hum (Humedad Relativa) en el archivo.")
 
 with tabs[2]:
     cols_pres = [c for c in ["bmp_pres", "bmp_slp", "bp1"] if c in df.columns]
