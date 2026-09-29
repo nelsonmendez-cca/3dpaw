@@ -3,4 +3,4 @@ pandas
 numpy
 matplotlib
 gdown>=6.0
-
+streamlit-autorefresh>=1.0
