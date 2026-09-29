@@ -582,7 +582,7 @@ with tabs[5]:
         factor = st.number_input(
             "Factor de conversión (mm/vuelco)",
             min_value=0.001,
-            value=0.254,
+            value=0.2,
             step=0.001,
             format="%.3f",
         )
