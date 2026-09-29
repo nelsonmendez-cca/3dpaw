@@ -45,6 +45,15 @@ def cargar_dat(file_bytes):
         if col not in columnas_fecha:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    columnas_obligatorias = {"year", "mon", "day", "hour", "min"}
+    faltan_fecha = columnas_obligatorias - set(df.columns)
+    if faltan_fecha:
+        raise ValueError(
+            "El archivo no tiene el formato 3DPaws esperado. "
+            f"Faltan columnas: {', '.join(sorted(faltan_fecha))}. "
+            "Solo deben procesarse archivos recordings_YYYY_MM_DD.dat."
+        )
+
     # Fecha/hora ajustada a El Salvador (UTC-6 sin horario de verano)
     df["fecha_hora"] = (
         pd.to_datetime(
@@ -117,49 +126,44 @@ def _buscar_columna(df, aliases):
 
 
 def detectar_temperaturas(df):
-    """Devuelve las columnas de los tres sensores 3DPaws."""
-    alias_temp = {
-        "bt1": [
-            "bt1", "bmx_t", "bmx_t_c", "bmx_temp", "bmx_temperature",
-            "bmx_temperature_c", "bmx_t°c", "bmx_t_celsius"
-        ],
-        "mt1": [
-            "mt1", "mcp9808", "mcp9808_t", "mcp9808_temp",
-            "mcp9808_temperature", "mcp9808_temperature_c"
-        ],
-        "st1": [
-            "st1", "sht31d", "sht31d_t", "sht31d_temp",
-            "sht31d_temperature", "hum_temp"
-        ],
+    """Reconoce las 3 temperaturas del formato original 3DPaws.
+
+    bmp_temp: temperatura interna del sensor de presión BMP
+    hum_temp: temperatura del sensor de humedad
+    mcp9808: temperatura del sensor MCP9808
+    """
+    sensores = {
+        "bmp_temp": "Temperatura BMP (sensor de presión)",
+        "hum_temp": "Temperatura del sensor de humedad",
+        "mcp9808": "MCP9808",
     }
+
     resultado = {}
-    for nombre, aliases in alias_temp.items():
-        encontrada = _buscar_columna(df, aliases)
-        if encontrada is not None:
-            serie = pd.to_numeric(df[encontrada], errors="coerce")
+    for col, descripcion in sensores.items():
+        if col in df.columns:
+            serie = pd.to_numeric(df[col], errors="coerce")
             serie = serie.replace([np.inf, -np.inf], np.nan)
             n_validos = int(serie.notna().sum())
             if n_validos > 0:
-                resultado[nombre] = (encontrada, n_validos)
+                resultado[col] = (col, n_validos, descripcion)
     return resultado
-
 
 def grafico_temperaturas(df):
     fig, ax = plt.subplots(figsize=(12, 4.5))
     sensores = detectar_temperaturas(df)
 
-    for nombre_3dpaws, (encontrada, _) in sensores.items():
-        serie = pd.to_numeric(df[encontrada], errors="coerce")
+    for col, (_, _, descripcion) in sensores.items():
+        serie = pd.to_numeric(df[col], errors="coerce")
         mask = df["fecha_hora"].notna() & serie.notna()
         if mask.any():
             ax.plot(
                 df.loc[mask, "fecha_hora"],
                 serie.loc[mask],
                 linewidth=1.2,
-                label=nombre_3dpaws,
+                label=f"{col} — {descripcion}",
             )
 
-    ax.set_title("Comparativa de Sensores de Temperatura (°C)")
+    ax.set_title("Comparativa de los 3 Sensores de Temperatura (°C)")
     ax.set_xlabel("Fecha y hora (UTC-6)")
     ax.set_ylabel("Temperatura (°C)")
     ax.grid(True, alpha=.25)
@@ -270,24 +274,13 @@ AUTO_REFRESH_SECONDS = 300
 # actualizada del archivo seleccionado.
 st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="3dpaws_auto_refresh")
 
-col_ref1, col_ref2 = st.columns([1, 4])
-with col_ref1:
-    if st.button("🔄 Actualizar ahora", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-with col_ref2:
-    st.caption("Actualización automática cada 5 minutos · también puedes actualizar manualmente.")
+st.caption("Actualización automática cada 5 minutos desde Google Drive · no es necesario recargar ni pulsar botones.")
 
 # ---------------------------------------------------------------------
 # Fuente de datos: carpeta pública de Google Drive
 # ---------------------------------------------------------------------
 DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1ECyuzx0Ec_6g7eoJvBkvHXWH89kgeLpJ"
 DRIVE_CACHE_TTL = 240  # 4 minutos; la estación actualiza aprox. cada 5 min
-
-# Streamlit reciente permite ejecutar un fragmento automáticamente.
-# Así la página se vuelve a consultar cada 5 minutos sin que el usuario
-# tenga que pulsar F5. Si la versión es antigua, se mantiene el botón manual.
-
 
 @st.cache_data(ttl=DRIVE_CACHE_TTL, show_spinner=False)
 def listar_archivos_drive():
@@ -302,19 +295,29 @@ def listar_archivos_drive():
         skip_download=True,
     )
 
+    # SOLO se aceptan archivos con el formato oficial de la estación:
+    # recordings_YYYY_MM_DD.dat
+    patron = re.compile(r"^recordings_(20\d{2})_(\d{2})_(\d{2})\.dat$", re.IGNORECASE)
+
     encontrados = []
     for item in archivos:
-        # gdown >= 6 devuelve objetos con id, path y local_path
-        # cuando se usa skip_download=True. Guardamos el ID para
-        # descargar SOLO el archivo seleccionado, no toda la carpeta.
         nombre = Path(getattr(item, "path", str(item))).name
-        file_id = getattr(item, "id", None)
+        m = patron.match(nombre)
+        if not m:
+            continue
 
-        if Path(nombre).suffix.lower() in (".dat", ".txt"):
-            encontrados.append({
-                "nombre": nombre,
-                "id": file_id,
-            })
+        try:
+            fecha = pd.Timestamp(
+                int(m.group(1)), int(m.group(2)), int(m.group(3))
+            )
+        except ValueError:
+            continue
+
+        encontrados.append({
+            "nombre": nombre,
+            "id": getattr(item, "id", None),
+            "fecha": fecha,
+        })
 
     return encontrados
 
@@ -380,13 +383,13 @@ except Exception as e:
     st.stop()
 
 if not archivos_drive:
-    st.warning("No se encontraron archivos .dat o .txt en Google Drive.")
+    st.warning("No se encontraron archivos con el formato recordings_YYYY_MM_DD.dat en Google Drive.")
     st.stop()
 
 # El archivo con la fecha más reciente queda primero.
 archivos_drive = sorted(
     archivos_drive,
-    key=lambda x: (fecha_nombre_archivo(x["nombre"]), x["nombre"]),
+    key=lambda x: (x["fecha"], x["nombre"]),
     reverse=True,
 )
 
@@ -461,23 +464,19 @@ with tabs[0]:
     st.pyplot(grafico_temperaturas(df), use_container_width=True)
 
     sensores_temp = detectar_temperaturas(df)
-    if sensores_temp:
-        detalle = " · ".join(
-            f"{nombre} → {col} ({n:,} válidos)"
-            for nombre, (col, n) in sensores_temp.items()
-        )
-        st.caption("Sensores detectados: " + detalle)
+    esperados = ["bmp_temp", "hum_temp", "mcp9808"]
+    detalle = " · ".join(
+        f"{col} ({sensores_temp[col][1]:,} válidos)"
+        for col in esperados if col in sensores_temp
+    )
+    if detalle:
+        st.caption("Temperaturas detectadas: " + detalle)
 
-        faltantes = [x for x in ["bt1", "mt1", "st1"] if x not in sensores_temp]
-        if faltantes:
-            st.warning(
-                "No se encontraron datos válidos para: " + ", ".join(faltantes) +
-                ". Revisa el encabezado del .dat y los valores faltantes."
-            )
-    else:
+    faltantes = [x for x in esperados if x not in sensores_temp]
+    if faltantes:
         st.warning(
-            "No se detectaron columnas de temperatura. "
-            "Columnas disponibles: " + ", ".join(map(str, df.columns))
+            "No se encontraron datos válidos para: " + ", ".join(faltantes) +
+            ". El formato esperado contiene: bmp_temp, hum_temp y mcp9808."
         )
 
     if "dif_temp_sensores" in df:
