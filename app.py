@@ -258,6 +258,9 @@ def grafico_viento(df):
 st.title("🌦️ 3DPaws — Analizador de estación meteorológica")
 st.caption("Visualización y control exploratorio de datos 3DPaws (Zona Horaria El Salvador UTC-6)")
 
+# Intervalo de actualización automática (5 minutos)
+AUTO_REFRESH_SECONDS = 300
+
 # ---------------------------------------------------------------------
 # Actualización automática
 # ---------------------------------------------------------------------
@@ -280,7 +283,6 @@ with col_ref2:
 # ---------------------------------------------------------------------
 DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1ECyuzx0Ec_6g7eoJvBkvHXWH89kgeLpJ"
 DRIVE_CACHE_TTL = 240  # 4 minutos; la estación actualiza aprox. cada 5 min
-AUTO_REFRESH_SECONDS = 300  # 5 minutos
 
 # Streamlit reciente permite ejecutar un fragmento automáticamente.
 # Así la página se vuelve a consultar cada 5 minutos sin que el usuario
