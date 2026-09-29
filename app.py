@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import gdown
 from pathlib import Path
 import tempfile
@@ -93,23 +94,61 @@ def rango_texto(df):
 # ---------------------------------------------------------------------
 # Funciones de Gráficos
 # ---------------------------------------------------------------------
+def _normalizar_nombre_columna(nombre):
+    """Normaliza nombres para poder reconocer variantes del archivo .dat."""
+    return (
+        str(nombre)
+        .replace("\ufeff", "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+
+
+def _buscar_columna(df, aliases):
+    """Devuelve la columna real que corresponda a alguno de los alias."""
+    mapa = {_normalizar_nombre_columna(c): c for c in df.columns}
+    for alias in aliases:
+        a = _normalizar_nombre_columna(alias)
+        if a in mapa:
+            return mapa[a]
+    return None
+
+
+def detectar_temperaturas(df):
+    """Devuelve las columnas de los tres sensores 3DPaws."""
+    alias_temp = {
+        "bt1": [
+            "bt1", "bmx_t", "bmx_t_c", "bmx_temp", "bmx_temperature",
+            "bmx_temperature_c", "bmx_t°c", "bmx_t_celsius"
+        ],
+        "mt1": [
+            "mt1", "mcp9808", "mcp9808_t", "mcp9808_temp",
+            "mcp9808_temperature", "mcp9808_temperature_c"
+        ],
+        "st1": [
+            "st1", "sht31d", "sht31d_t", "sht31d_temp",
+            "sht31d_temperature", "hum_temp"
+        ],
+    }
+    resultado = {}
+    for nombre, aliases in alias_temp.items():
+        encontrada = _buscar_columna(df, aliases)
+        if encontrada is not None:
+            serie = pd.to_numeric(df[encontrada], errors="coerce")
+            serie = serie.replace([np.inf, -np.inf], np.nan)
+            n_validos = int(serie.notna().sum())
+            if n_validos > 0:
+                resultado[nombre] = (encontrada, n_validos)
+    return resultado
+
+
 def grafico_temperaturas(df):
     fig, ax = plt.subplots(figsize=(12, 4.5))
+    sensores = detectar_temperaturas(df)
 
-    # Nombre oficial 3DPaws -> posibles nombres usados en archivos antiguos.
-    # Se mantiene bt1/mt1/st1 como etiqueta de salida.
-    alias_temp = {
-        "bt1": ["bt1", "bmx_t", "bmx_temp", "bmx_temperature"],
-        "mt1": ["mt1", "mcp9808", "mcp9808_t", "mcp9808_temp"],
-        "st1": ["st1", "sht31d", "sht31d_t", "sht31d_temp", "hum_temp"],
-    }
-
-    dibujadas = 0
-    for nombre_3dpaws, aliases in alias_temp.items():
-        encontrada = next((c for c in aliases if c in df.columns), None)
-        if encontrada is None:
-            continue
-
+    for nombre_3dpaws, (encontrada, _) in sensores.items():
         serie = pd.to_numeric(df[encontrada], errors="coerce")
         mask = df["fecha_hora"].notna() & serie.notna()
         if mask.any():
@@ -119,14 +158,13 @@ def grafico_temperaturas(df):
                 linewidth=1.2,
                 label=nombre_3dpaws,
             )
-            dibujadas += 1
 
     ax.set_title("Comparativa de Sensores de Temperatura (°C)")
     ax.set_xlabel("Fecha y hora (UTC-6)")
     ax.set_ylabel("Temperatura (°C)")
     ax.grid(True, alpha=.25)
 
-    if dibujadas:
+    if sensores:
         ax.legend(loc="upper left")
     else:
         ax.text(
@@ -221,10 +259,32 @@ st.title("🌦️ 3DPaws — Analizador de estación meteorológica")
 st.caption("Visualización y control exploratorio de datos 3DPaws (Zona Horaria El Salvador UTC-6)")
 
 # ---------------------------------------------------------------------
+# Actualización automática
+# ---------------------------------------------------------------------
+# La estación publica nuevos datos aproximadamente cada 5 minutos.
+# st_autorefresh fuerza un rerun COMPLETO de la aplicación, de modo que
+# también se vuelve a consultar Google Drive y se descarga la versión
+# actualizada del archivo seleccionado.
+st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="3dpaws_auto_refresh")
+
+col_ref1, col_ref2 = st.columns([1, 4])
+with col_ref1:
+    if st.button("🔄 Actualizar ahora", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+with col_ref2:
+    st.caption("Actualización automática cada 5 minutos · también puedes actualizar manualmente.")
+
+# ---------------------------------------------------------------------
 # Fuente de datos: carpeta pública de Google Drive
 # ---------------------------------------------------------------------
 DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1ECyuzx0Ec_6g7eoJvBkvHXWH89kgeLpJ"
-DRIVE_CACHE_TTL = 600  # 10 minutos
+DRIVE_CACHE_TTL = 240  # 4 minutos; la estación actualiza aprox. cada 5 min
+AUTO_REFRESH_SECONDS = 300  # 5 minutos
+
+# Streamlit reciente permite ejecutar un fragmento automáticamente.
+# Así la página se vuelve a consultar cada 5 minutos sin que el usuario
+# tenga que pulsar F5. Si la versión es antigua, se mantiene el botón manual.
 
 
 @st.cache_data(ttl=DRIVE_CACHE_TTL, show_spinner=False)
@@ -235,7 +295,7 @@ def listar_archivos_drive():
     archivos = gdown.download_folder(
         url=DRIVE_FOLDER_URL,
         output=str(cache_dir),
-        quiet=False,
+        quiet=True,
         use_cookies=False,
         skip_download=True,
     )
@@ -274,26 +334,32 @@ def fecha_nombre_archivo(nombre):
     return pd.Timestamp.min
 
 
-@st.cache_data(ttl=DRIVE_CACHE_TTL, show_spinner=False)
 def descargar_archivo_drive(file_id, nombre):
     """Descarga únicamente el archivo seleccionado de Google Drive."""
     cache_dir = Path(tempfile.gettempdir()) / "3dpaws_drive"
     cache_dir.mkdir(parents=True, exist_ok=True)
     destino = cache_dir / Path(nombre).name
 
-    if not destino.exists():
-        if not file_id:
-            raise RuntimeError(
-                f"Google Drive no devolvió el ID del archivo '{nombre}'. "
-                "Instala gdown>=6.0."
-            )
+    # El archivo de Drive puede cambiar aunque conserve el mismo nombre.
+    # Por eso lo volvemos a descargar en cada actualización de la página.
+    if destino.exists():
+        try:
+            destino.unlink()
+        except OSError:
+            pass
 
-        gdown.download(
-            id=file_id,
-            output=str(destino),
-            quiet=True,
-            use_cookies=False,
+    if not file_id:
+        raise RuntimeError(
+            f"Google Drive no devolvió el ID del archivo '{nombre}'. "
+            "Instala gdown>=6.0."
         )
+
+    gdown.download(
+        id=file_id,
+        output=str(destino),
+        quiet=True,
+        use_cookies=False,
+    )
 
     if not destino.exists():
         raise FileNotFoundError(f"No se pudo descargar: {nombre}")
@@ -392,18 +458,24 @@ tabs = st.tabs([
 with tabs[0]:
     st.pyplot(grafico_temperaturas(df), use_container_width=True)
 
-    # Diagnóstico visible: si el archivo trae nombres ligeramente distintos,
-    # aquí podemos comprobar qué variables de temperatura fueron detectadas.
-    candidatas_temp = [
-        c for c in df.columns
-        if any(p in c for p in ["bt1", "mt1", "st1", "bmx", "mcp9808", "sht31", "hum_temp"])
-    ]
-    if candidatas_temp:
-        st.caption("Variables de temperatura detectadas: " + ", ".join(candidatas_temp))
+    sensores_temp = detectar_temperaturas(df)
+    if sensores_temp:
+        detalle = " · ".join(
+            f"{nombre} → {col} ({n:,} válidos)"
+            for nombre, (col, n) in sensores_temp.items()
+        )
+        st.caption("Sensores detectados: " + detalle)
+
+        faltantes = [x for x in ["bt1", "mt1", "st1"] if x not in sensores_temp]
+        if faltantes:
+            st.warning(
+                "No se encontraron datos válidos para: " + ", ".join(faltantes) +
+                ". Revisa el encabezado del .dat y los valores faltantes."
+            )
     else:
         st.warning(
             "No se detectaron columnas de temperatura. "
-            "Revisa los nombres de las columnas del archivo .dat."
+            "Columnas disponibles: " + ", ".join(map(str, df.columns))
         )
 
     if "dif_temp_sensores" in df:
