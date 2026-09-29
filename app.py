@@ -235,7 +235,7 @@ def listar_archivos_drive():
     archivos = gdown.download_folder(
         url=DRIVE_FOLDER_URL,
         output=str(cache_dir),
-        quiet=True,
+        quiet=False,
         use_cookies=False,
         skip_download=True,
     )
