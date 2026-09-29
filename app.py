@@ -221,39 +221,139 @@ def dibujar_pluviometro(valor_mm, capacidad=100):
     return fig
 
 def grafico_viento(df):
+    """Rosa de viento con frecuencia (%) y flecha del último dato."""
     col_dir = "wind_dir" if "wind_dir" in df.columns else ("wd" if "wd" in df.columns else None)
     col_spd = "wind_speed" if "wind_speed" in df.columns else ("ws" if "ws" in df.columns else None)
 
     if not col_dir or not col_spd:
-        return None
-    
-    w = df[[col_dir, col_spd]].dropna().copy()
-    w = w[w[col_spd] > 0]
-    
-    if w.empty:
-        return None
+        return None, None
+
+    # Convertimos explícitamente a numérico para evitar problemas si Drive
+    # entrega alguna columna como texto.
+    w = pd.DataFrame({
+        "direccion": pd.to_numeric(df[col_dir], errors="coerce"),
+        "velocidad": pd.to_numeric(df[col_spd], errors="coerce"),
+        "fecha": df["fecha_hora"],
+    })
+
+    # Dirección válida 0–360. Se conserva la convención meteorológica:
+    # 0°/360° = N, 90° = E, 180° = S, 270° = O.
+    w = w[w["direccion"].between(0, 360, inclusive="both")]
+    w = w[np.isfinite(w["direccion"])]
+
+    # Para la rosa se mantienen las observaciones con velocidad positiva,
+    # igual que en la versión anterior.
+    w_rosa = w[w["velocidad"] > 0].copy()
+
+    if w_rosa.empty:
+        return None, None
 
     sectores = np.arange(0, 360, 22.5)
-    nombres = ["N","NNE","NE","ENE","E","ESE","SE","SSE",
-               "S","SSO","SO","OSO","O","ONO","NO","NNO"]
+    nombres = [
+        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+        "S", "SSO", "SO", "OSO", "O", "ONO", "NO", "NNO"
+    ]
 
-    idx = ((w[col_dir] + 11.25) // 22.5).astype(int) % 16
+    # Cada observación se asigna al sector de 22.5° más cercano.
+    idx = ((w_rosa["direccion"] + 11.25) // 22.5).astype(int) % 16
     frecuencias = idx.value_counts().reindex(range(16), fill_value=0).sort_index()
     porcentajes = frecuencias / frecuencias.sum() * 100
+
+    # Sector predominante según frecuencia.
+    idx_predominante = int(porcentajes.values.argmax())
+    direccion_predominante = float(sectores[idx_predominante])
+    nombre_predominante = nombres[idx_predominante]
+    porcentaje_predominante = float(porcentajes.iloc[idx_predominante])
+
+    # Último dato válido de dirección. No necesariamente tiene que ser el
+    # último registro del archivo si ese registro viene sin dirección.
+    w_ultimo = w.dropna(subset=["direccion", "fecha"]).sort_values("fecha")
+    if w_ultimo.empty:
+        ultimo_dir = None
+        ultima_fecha = None
+        ultimo_nombre = None
+    else:
+        ultimo_dir = float(w_ultimo.iloc[-1]["direccion"]) % 360
+        ultima_fecha = w_ultimo.iloc[-1]["fecha"]
+        idx_ultimo = int(((ultimo_dir + 11.25) // 22.5)) % 16
+        ultimo_nombre = nombres[idx_ultimo]
 
     theta = np.deg2rad(sectores)
     width = np.deg2rad(22.5)
 
-    fig = plt.figure(figsize=(6, 6))
+    fig = plt.figure(figsize=(6.8, 6.4))
     ax = fig.add_subplot(111, polar=True)
-    ax.bar(theta, porcentajes.values, width=width, align="center", alpha=.75, color="tab:blue")
+
+    # Rosa de viento: porcentaje de las mediciones disponibles hasta el momento.
+    ax.bar(
+        theta,
+        porcentajes.values,
+        width=width * 0.92,
+        align="center",
+        alpha=.75,
+        color="tab:blue",
+        edgecolor="black",
+        linewidth=.5,
+    )
+
     ax.set_theta_zero_location("N")
     ax.set_theta_direction(-1)
     ax.set_xticks(theta)
     ax.set_xticklabels(nombres)
-    ax.set_title("Rosa de Viento — Frecuencia (%)", pad=20)
+    ax.set_ylabel("Frecuencia (%)")
+    ax.set_title("Rosa de Viento — Frecuencia de las mediciones (%)", pad=22)
+
+    # Flecha de alto contraste: dirección del ÚLTIMO dato registrado.
+    if ultimo_dir is not None:
+        ang = np.deg2rad(ultimo_dir)
+        r_flecha = max(float(porcentajes.max()) * 0.92, 10.0)
+        ax.annotate(
+            "",
+            xy=(ang, r_flecha),
+            xytext=(ang, 0),
+            arrowprops=dict(
+                arrowstyle="-|>",
+                color="black",
+                lw=3.0,
+                mutation_scale=18,
+            ),
+            zorder=10,
+        )
+        ax.scatter([ang], [r_flecha], s=55, color="black", zorder=11)
+
+        ax.text(
+            0.5,
+            -0.10,
+            f"Último dato: {ultimo_dir:.1f}° ({ultimo_nombre})",
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+            fontsize=10,
+            fontweight="bold",
+        )
+
+    ax.text(
+        0.5,
+        -0.16,
+        f"Predominante: {nombre_predominante} ({direccion_predominante:.1f}°) — {porcentaje_predominante:.1f}%",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=10,
+    )
+
     fig.tight_layout()
-    return fig
+
+    info = {
+        "n_mediciones": len(w_rosa),
+        "predominante": nombre_predominante,
+        "predominante_grados": direccion_predominante,
+        "predominante_porcentaje": porcentaje_predominante,
+        "ultimo_grados": ultimo_dir,
+        "ultimo_sector": ultimo_nombre,
+        "ultima_fecha": ultima_fecha,
+    }
+    return fig, info
 
 
 # ---------------------------------------------------------------------
@@ -508,9 +608,21 @@ with tabs[3]:
 with tabs[4]:
     c1, c2 = st.columns([1, 1.2])
     with c1:
-        fig_viento = grafico_viento(df)
+        fig_viento, info_viento = grafico_viento(df)
         if fig_viento:
             st.pyplot(fig_viento, use_container_width=True)
+            if info_viento:
+                if info_viento["ultima_fecha"] is not None:
+                    fecha_ult = info_viento["ultima_fecha"].strftime("%d/%m/%Y %H:%M")
+                else:
+                    fecha_ult = "sin fecha"
+                st.caption(
+                    f"{info_viento['n_mediciones']:,} mediciones de viento válidas. "
+                    f"Última dirección: {info_viento['ultimo_grados']:.1f}° "
+                    f"({info_viento['ultimo_sector']}) · {fecha_ult}. "
+                    f"Dirección predominante: {info_viento['predominante']} "
+                    f"({info_viento['predominante_porcentaje']:.1f}%)."
+                )
         else:
             st.info("No hay datos suficientes de dirección/velocidad de viento.")
     with c2:
@@ -582,7 +694,7 @@ with tabs[5]:
         factor = st.number_input(
             "Factor de conversión (mm/vuelco)",
             min_value=0.001,
-            value=0.2,
+            value=0.254,
             step=0.001,
             format="%.3f",
         )
