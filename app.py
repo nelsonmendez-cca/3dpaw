@@ -132,8 +132,7 @@ def detectar_temperaturas(df):
     hum_temp: temperatura del sensor de humedad
     mcp9808: temperatura del sensor MCP9808
     """
-    sensores = {
-        "mcp9808": "Temperatura"
+    sensores = { "Temperatura"
     }
 
     resultado = {}
@@ -161,9 +160,9 @@ def grafico_temperaturas(df):
                 label=f"{col} — {descripcion}",
             )
 
-    ax.set_title("Comparativa de los 3 Sensores de Temperatura (°C)")
+    ax.set_title("Temperatura")
     ax.set_xlabel("Fecha y hora (UTC-6)")
-    ax.set_ylabel("Temperatura (°C)")
+    ax.set_ylabel("Grados(°C)")
     ax.grid(True, alpha=.25)
 
     if sensores:
