@@ -126,13 +126,8 @@ def _buscar_columna(df, aliases):
 
 
 def detectar_temperaturas(df):
-    """Reconoce las 3 temperaturas del formato original 3DPaws.
 
-    bmp_temp: temperatura interna del sensor de presión BMP
-    hum_temp: temperatura del sensor de humedad
-    mcp9808: temperatura del sensor MCP9808
-    """
-    sensores = { "Temperatura"
+    sensores = { "Temperatura":"sensor"
     }
 
     resultado = {}
