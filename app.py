@@ -571,8 +571,8 @@ with tabs[0]:
      #       ". El formato esperado contiene: bmp_temp, hum_temp y mcp9808."
      #   )
 
-    if "dif_temp_sensores" in df:
-        st.caption("Nota: La diferencia entre sensores permite identificar desfases por radiación o sesgo de calibración.")
+  #  if "dif_temp_sensores" in df:
+  #      st.caption("Nota: La diferencia entre sensores permite identificar desfases por radiación o sesgo de calibración.")
 
 with tabs[1]:
     col_hum = [c for c in ["hum_hum"] if c in df.columns]
