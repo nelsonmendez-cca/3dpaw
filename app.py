@@ -564,7 +564,7 @@ with tabs[0]:
     if detalle:
         st.caption("Temperaturas detectadas: " + detalle)
 
- #   faltantes = [x for x in esperados if x not in sensores_temp]
+   faltantes = [x for x in esperados if x not in sensores_temp]
   #  if faltantes:
    #     st.warning(
     #        "No se encontraron datos válidos para: " + ", ".join(faltantes) +
