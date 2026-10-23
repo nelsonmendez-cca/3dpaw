@@ -564,12 +564,12 @@ with tabs[0]:
     if detalle:
         st.caption("Temperaturas detectadas: " + detalle)
 
-    faltantes = [x for x in esperados if x not in sensores_temp]
-    if faltantes:
-        st.warning(
-            "No se encontraron datos válidos para: " + ", ".join(faltantes) +
-            ". El formato esperado contiene: bmp_temp, hum_temp y mcp9808."
-        )
+ #   faltantes = [x for x in esperados if x not in sensores_temp]
+  #  if faltantes:
+   #     st.warning(
+    #        "No se encontraron datos válidos para: " + ", ".join(faltantes) +
+     #       ". El formato esperado contiene: bmp_temp, hum_temp y mcp9808."
+     #   )
 
     if "dif_temp_sensores" in df:
         st.caption("Nota: La diferencia entre sensores permite identificar desfases por radiación o sesgo de calibración.")
