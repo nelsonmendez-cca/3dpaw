@@ -133,9 +133,7 @@ def detectar_temperaturas(df):
     mcp9808: temperatura del sensor MCP9808
     """
     sensores = {
-        "bmp_temp": "Temperatura BMP (sensor de presión)",
-        "hum_temp": "Temperatura del sensor de humedad",
-        "mcp9808": "MCP9808",
+        "mcp9808": "Temperatura"
     }
 
     resultado = {}
