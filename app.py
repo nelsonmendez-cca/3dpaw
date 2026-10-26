@@ -143,27 +143,29 @@ def dar_formato_eje_hora(ax):
     ax.grid(True, alpha=.25)
 
 def grafico_temperatura(df):
+    """Grafica las tres temperaturas disponibles, sin asumir que son idénticas."""
     fig, ax = plt.subplots(figsize=(12, 4.5))
-
-    if "mcp9808" in df.columns:
-        serie = pd.to_numeric(df["mcp9808"], errors="coerce")
-        mask = df["fecha_hora"].notna() & serie.notna()
+    sensores = [
+        ("bmp_temp", "Temperatura BMP", "tab:blue"),
+        ("hum_temp", "Temperatura sensor de humedad", "tab:orange"),
+        ("mcp9808", "Temperatura MCP9808", "tab:red"),
+    ]
+    dibujadas = 0
+    for col, etiqueta, color in sensores:
+        if col not in df.columns:
+            continue
+        serie = pd.to_numeric(df[col], errors="coerce")
+        mask = df["fecha_hora"].notna() & serie.notna() & serie.between(-40, 85)
         if mask.any():
-            ax.plot(
-                df.loc[mask, "fecha_hora"],
-                serie.loc[mask],
-                linewidth=1.3,
-                color="tab:red",
-                label="Temperatura del Aire",
-            )
-            ax.legend(loc="upper left")
-        else:
-            ax.text(0.5, 0.5, "Sin registros válidos de temperatura", transform=ax.transAxes, ha="center")
+            ax.plot(df.loc[mask, "fecha_hora"], serie.loc[mask], linewidth=1.2,
+                    color=color, label=etiqueta)
+            dibujadas += 1
+    if dibujadas:
+        ax.legend(loc="best")
     else:
-        ax.text(0.5, 0.5, "No se encontró el registro de temperatura", transform=ax.transAxes, ha="center")
-
-    ax.set_title("Temperatura del Aire (°C)")
-    ax.set_xlabel("Hora")
+        ax.text(0.5, 0.5, "Sin registros válidos de temperatura", transform=ax.transAxes, ha="center")
+    ax.set_title("Temperaturas medidas por los sensores (°C)")
+    ax.set_xlabel("Hora local (El Salvador)")
     ax.set_ylabel("Temperatura (°C)")
     dar_formato_eje_hora(ax)
     fig.autofmt_xdate()
@@ -210,103 +212,131 @@ def dibujar_pluviometro(valor_mm, capacidad=100):
     return fig
 
 def grafico_viento(df):
+    """Rosa de viento; informa calma cuando no existen velocidades positivas."""
     if "wind_dir" not in df.columns or "wind_speed" not in df.columns:
-        return None, None
+        return None, {"estado": "faltan_columnas"}
 
     w = pd.DataFrame({
         "direccion": pd.to_numeric(df["wind_dir"], errors="coerce"),
         "velocidad": pd.to_numeric(df["wind_speed"], errors="coerce"),
         "fecha": df["fecha_hora"],
     })
-
-    w = w[w["direccion"].between(0, 360, inclusive="both")]
-    w = w[np.isfinite(w["direccion"])]
-    w_rosa = w[w["velocidad"] > 0].copy()
-
-    if w_rosa.empty:
-        return None, None
+    w.loc[~w["direccion"].between(0, 360), "direccion"] = np.nan
+    w.loc[~w["velocidad"].between(0, 75), "velocidad"] = np.nan
+    w = w.sort_values("fecha")
+    valid_speed = w.dropna(subset=["velocidad"])
+    speed_now = float(valid_speed.iloc[-1]["velocidad"]) if not valid_speed.empty else np.nan
+    positive = w.dropna(subset=["direccion", "velocidad"])
+    w_rosa = positive[positive["velocidad"] > 0].copy()
 
     sectores = np.arange(0, 360, 22.5)
     nombres = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSO", "SO", "OSO", "O", "ONO", "NO", "NNO"]
-
-    idx = ((w_rosa["direccion"] + 11.25) // 22.5).astype(int) % 16
-    frecuencias = idx.value_counts().reindex(range(16), fill_value=0).sort_index()
-    porcentajes = frecuencias / frecuencias.sum() * 100
-
-    idx_predominante = int(porcentajes.values.argmax())
-    direccion_predominante = float(sectores[idx_predominante])
-    nombre_predominante = nombres[idx_predominante]
-    porcentaje_predominante = float(porcentajes.iloc[idx_predominante])
-
-    w_ultimo = w.dropna(subset=["direccion", "fecha"]).sort_values("fecha")
-    if w_ultimo.empty:
-        ultimo_dir, ultima_fecha, ultimo_nombre = None, None, None
-    else:
-        ultimo_dir = float(w_ultimo.iloc[-1]["direccion"]) % 360
-        ultima_fecha = w_ultimo.iloc[-1]["fecha"]
-        idx_ultimo = int(((ultimo_dir + 11.25) // 22.5)) % 16
-        ultimo_nombre = nombres[idx_ultimo]
-
-    theta = np.deg2rad(sectores)
-    width = np.deg2rad(22.5)
-
     fig = plt.figure(figsize=(6.8, 6.4))
     ax = fig.add_subplot(111, polar=True)
-
-    ax.bar(
-        theta,
-        porcentajes.values,
-        width=width * 0.92,
-        align="center",
-        alpha=.75,
-        color="tab:blue",
-        edgecolor="black",
-        linewidth=.5,
-    )
-
     ax.set_theta_zero_location("N")
     ax.set_theta_direction(-1)
-    ax.set_xticks(theta)
+    ax.set_xticks(np.deg2rad(sectores))
     ax.set_xticklabels(nombres)
-    ax.set_ylabel("Frecuencia (%)")
-    ax.set_title("Rosa de Viento — Frecuencia (%)", pad=22)
 
-    if ultimo_dir is not None:
-        ang = np.deg2rad(ultimo_dir)
-        r_flecha = max(float(porcentajes.max()) * 0.92, 10.0)
-        ax.annotate(
-            "",
-            xy=(ang, r_flecha),
-            xytext=(ang, 0),
-            arrowprops=dict(arrowstyle="-|>", color="black", lw=3.0, mutation_scale=18),
-            zorder=10,
-        )
-        ax.scatter([ang], [r_flecha], s=55, color="black", zorder=11)
-        ax.text(
-            0.5, -0.10,
-            f"Último dato: {ultimo_dir:.1f}° ({ultimo_nombre})",
-            transform=ax.transAxes, ha="center", va="center",
-            fontsize=10, fontweight="bold",
-        )
+    if not w_rosa.empty:
+        idx = ((w_rosa["direccion"] % 360 + 11.25) // 22.5).astype(int) % 16
+        frecuencias = idx.value_counts().reindex(range(16), fill_value=0).sort_index()
+        porcentajes = frecuencias / frecuencias.sum() * 100
+        ax.bar(np.deg2rad(sectores), porcentajes.values, width=np.deg2rad(22.5) * .92,
+               align="center", alpha=.75, color="tab:blue", edgecolor="black", linewidth=.5)
+        idx_pred = int(porcentajes.values.argmax())
+        pred_nombre = nombres[idx_pred]
+        pred_grados = float(sectores[idx_pred])
+        pred_pct = float(porcentajes.iloc[idx_pred])
+        # La flecha solo se muestra si la observación más reciente tiene velocidad positiva.
+        latest = w.dropna(subset=["direccion", "velocidad", "fecha"])
+        latest = latest[latest["velocidad"] > 0]
+        if not latest.empty:
+            last = latest.iloc[-1]
+            last_dir = float(last["direccion"] % 360)
+            last_idx = int(((last_dir + 11.25) // 22.5)) % 16
+            last_name = nombres[last_idx]
+            r_arrow = max(float(porcentajes.max()) * .92, 5.0)
+            ax.annotate("", xy=(np.deg2rad(last_dir), r_arrow), xytext=(np.deg2rad(last_dir), 0),
+                        arrowprops=dict(arrowstyle="-|>", color="black", lw=3, mutation_scale=18), zorder=10)
+            last_text = f"Última dirección con viento: {last_dir:.1f}° ({last_name}) — {last['fecha']:%d/%m %H:%M}"
+        else:
+            last_text = "Sin dirección reciente asociada a viento > 0 m/s"
+        ax.text(.5, -.10, last_text, transform=ax.transAxes, ha="center", va="center", fontsize=9, fontweight="bold")
+        ax.text(.5, -.16, f"Predominante: {pred_nombre} ({pred_grados:.1f}°) — {pred_pct:.1f}%",
+                transform=ax.transAxes, ha="center", va="center", fontsize=10)
+        estado = "viento" if pd.notna(speed_now) and speed_now > 0 else "calma"
+        n_rosa = len(w_rosa)
+    else:
+        pred_nombre, pred_grados, pred_pct = "Sin datos", np.nan, 0.0
+        last_text = "No se dibuja dirección: no hay observaciones con velocidad > 0 m/s"
+        ax.text(.5, .50, "CALMA / SIN VIENTO MEDIDO\nNo hay velocidades positivas para calcular la rosa", transform=ax.transAxes,
+                ha="center", va="center", fontsize=11, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=.5", facecolor="white", alpha=.85))
+        ax.text(.5, -.10, last_text, transform=ax.transAxes, ha="center", va="center", fontsize=9)
+        estado, n_rosa = "calma", 0
 
-    ax.text(
-        0.5, -0.16,
-        f"Predominante: {nombre_predominante} ({direccion_predominante:.1f}°) — {porcentaje_predominante:.1f}%",
-        transform=ax.transAxes, ha="center", va="center", fontsize=10,
-    )
-
+    ax.set_title("Rosa de viento — frecuencia de direcciones con viento (%)", pad=22)
     fig.tight_layout()
+    return fig, {"estado": estado, "velocidad_actual": speed_now, "n_mediciones": n_rosa,
+                 "predominante": pred_nombre, "predominante_grados": pred_grados,
+                 "predominante_porcentaje": pred_pct}
 
-    info = {
-        "n_mediciones": len(w_rosa),
-        "predominante": nombre_predominante,
-        "predominante_grados": direccion_predominante,
-        "predominante_porcentaje": porcentaje_predominante,
-        "ultimo_grados": ultimo_dir,
-        "ultimo_sector": ultimo_nombre,
-        "ultima_fecha": ultima_fecha,
-    }
-    return fig, info
+
+def radiacion_extraterrestre_mj_dia(fecha, latitud_grados):
+    """Radiación extraterrestre diaria Ra (MJ m-2 día-1), FAO-56."""
+    j = pd.Timestamp(fecha).dayofyear
+    phi = np.deg2rad(float(latitud_grados))
+    dr = 1 + 0.033 * np.cos(2 * np.pi * j / 365)
+    delta = 0.409 * np.sin(2 * np.pi * j / 365 - 1.39)
+    x = -np.tan(phi) * np.tan(delta)
+    ws = np.arccos(np.clip(x, -1, 1))
+    gsc = 0.0820
+    ra = (24 * 60 / np.pi) * gsc * dr * (ws * np.sin(phi) * np.sin(delta) + np.cos(phi) * np.cos(delta) * np.sin(ws))
+    return max(0.0, float(ra))
+
+
+def calcular_et_balance_diario(df, latitud, capacidad_suelo, almacenamiento_inicial):
+    """ET0 Hargreaves-Samani y balance de depósito de suelo simplificado por día."""
+    if "mcp9808" not in df.columns:
+        return pd.DataFrame()
+    datos = df.dropna(subset=["fecha_hora"]).copy()
+    datos["fecha"] = datos["fecha_hora"].dt.floor("D")
+    datos["temp_ref"] = pd.to_numeric(datos["mcp9808"], errors="coerce")
+    diario = datos.groupby("fecha").agg(Tmin_C=("temp_ref", "min"), Tmax_C=("temp_ref", "max"), n_temp=("temp_ref", "count"))
+    if "PP_Plot" in datos.columns:
+        diario["P_mm"] = datos.groupby("fecha")["PP_Plot"].sum(min_count=1).fillna(0)
+    elif "PP_Calculada" in datos.columns:
+        diario["P_mm"] = datos.groupby("fecha")["PP_Calculada"].sum(min_count=1).fillna(0)
+    else:
+        diario["P_mm"] = np.nan
+    diario["Tmedia_C"] = (diario["Tmax_C"] + diario["Tmin_C"]) / 2
+    diario["Ra_MJ_m2_dia"] = [radiacion_extraterrestre_mj_dia(f, latitud) for f in diario.index]
+    amplitud = (diario["Tmax_C"] - diario["Tmin_C"]).clip(lower=0)
+    diario["ET0_mm_dia"] = 0.0023 * (diario["Tmedia_C"] + 17.8).clip(lower=0) * np.sqrt(amplitud) * diario["Ra_MJ_m2_dia"]
+    diario["ET0_mm_dia"] = diario["ET0_mm_dia"].where(diario["n_temp"] > 0)
+
+    almacen = float(almacenamiento_inicial)
+    almacen_ini, eta_real, deficit, excedente, almacen_fin = [], [], [], [], []
+    for _, row in diario.iterrows():
+        almacen_ini.append(almacen)
+        p = row["P_mm"]
+        et0 = row["ET0_mm_dia"]
+        if pd.isna(p) or pd.isna(et0):
+            eta_real.append(np.nan); deficit.append(np.nan); excedente.append(np.nan); almacen_fin.append(almacen)
+            continue
+        agua = almacen + max(0.0, float(p))
+        eta = min(max(0.0, float(et0)), agua)
+        sobrante = max(0.0, agua - eta - capacidad_suelo)
+        almacen = min(capacidad_suelo, max(0.0, agua - eta))
+        eta_real.append(eta); deficit.append(max(0.0, float(et0) - eta)); excedente.append(sobrante); almacen_fin.append(almacen)
+    diario["Almacenamiento_inicial_mm"] = almacen_ini
+    diario["ET_real_estimada_mm"] = eta_real
+    diario["Deficit_hidrico_mm"] = deficit
+    diario["Excedente_mm"] = excedente
+    diario["Almacenamiento_final_mm"] = almacen_fin
+    diario.index.name = "Fecha"
+    return diario.reset_index()
 
 # ---------------------------------------------------------------------
 # Interfaz principal
@@ -436,6 +466,7 @@ tabs = st.tabs([
     "Radiación / Luz",
     "Viento",
     "Precipitación / QC",
+    "ET0 y Balance Hídrico",
     "Datos Raw",
 ])
 
@@ -443,12 +474,12 @@ tabs = st.tabs([
 with tabs[0]:
     st.pyplot(grafico_temperatura(df), use_container_width=True)
     if "mcp9808" in df.columns:
-        t_ser = df["mcp9808"].dropna()
+        t_ser = pd.to_numeric(df["mcp9808"], errors="coerce").dropna()
         if not t_ser.empty:
             c1, c2, c3 = st.columns(3)
-            c1.metric("Temperatura Media", f"{t_ser.mean():.1f} °C")
-            c2.metric("Temperatura Mínima", f"{t_ser.min():.1f} °C")
-            c3.metric("Temperatura Máxima", f"{t_ser.max():.1f} °C")
+            c1.metric("Media MCP9808", f"{t_ser.mean():.1f} °C")
+            c2.metric("Mínima MCP9808", f"{t_ser.min():.1f} °C")
+            c3.metric("Máxima MCP9808", f"{t_ser.max():.1f} °C")
 
 # 2. Humedad
 with tabs[1]:
@@ -495,8 +526,13 @@ with tabs[4]:
         fig_viento, info_viento = grafico_viento(df)
         if fig_viento:
             st.pyplot(fig_viento, use_container_width=True)
+            if info_viento and pd.notna(info_viento.get("velocidad_actual", np.nan)):
+                st.metric("Última velocidad registrada", f"{info_viento['velocidad_actual']:.2f} m/s",
+                          help="Si es 0 m/s, se interpreta como calma; no se presenta como dirección actual una veleta sin viento.")
+            if info_viento and info_viento.get("estado") == "calma":
+                st.info("Calma o ausencia de viento medido: se conserva el gráfico y no se inventa una dirección actual.")
         else:
-            st.info("No hay datos suficientes de viento.")
+            st.warning("No se encontraron las columnas wind_dir y wind_speed en el archivo.")
     with c2:
         if "wind_speed" in df.columns:
             st.pyplot(
@@ -509,7 +545,8 @@ with tabs[5]:
     st.markdown("### 🌧️ Precipitación y Control de Calidad (QC)")
 
     if "tipping" in df.columns:
-        aplicar_qc = st.checkbox("Activar Algoritmo QC (Filtrar Lluvia Ficticia)", value=True)
+        aplicar_qc = st.checkbox("Activar filtro heurístico de lluvia (experimental)", value=True)
+        st.caption("Este filtro usa humedad y punto de rocío como indicios, no confirma por sí solo lluvia real. Compare los datos filtrados con el pluviómetro y observación local antes de usar el acumulado como dato oficial.")
 
         factor = st.number_input(
             "Factor de conversión (mm por vuelco)",
@@ -560,8 +597,74 @@ with tabs[5]:
     else:
         st.warning("No se encontró el registro 'tipping' para procesar la precipitación.")
 
-# 7. Datos
+# 7. Evapotranspiración de referencia y balance hídrico simplificado
 with tabs[6]:
+    st.markdown("### 🌱 Evapotranspiración de referencia (ET₀) y balance hídrico")
+    st.warning(
+        "Estimación orientativa con Hargreaves-Samani. Los sensores de luz de esta estación reportan niveles/cuentas, "
+        "no radiación solar calibrada en MJ/m²/día; por eso no se calcula Penman–Monteith FAO-56. "
+        "El resultado depende de que el MCP9808 represente razonablemente la temperatura del aire y de disponer de días completos."
+    )
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        latitud_et = st.number_input("Latitud de la estación (°; norte positivo)", min_value=-60.0, max_value=60.0,
+                                     value=13.70, step=0.01, format="%.4f",
+                                     help="Cambie el valor por la latitud real de la estación; 13.70° es solo un valor inicial aproximado para El Salvador.")
+    with c2:
+        capacidad_suelo = st.number_input("Capacidad de agua disponible del suelo (mm)", min_value=1.0, max_value=500.0,
+                                          value=100.0, step=5.0,
+                                          help="Supuesto editable. No es una propiedad medida por esta estación.")
+    with c3:
+        fraccion_inicial = st.slider("Almacenamiento inicial del suelo (%)", min_value=0, max_value=100, value=50, step=5)
+
+    if "mcp9808" not in df.columns:
+        st.error("No existe la variable mcp9808 para estimar la ET₀.")
+    elif "PP_Plot" not in df.columns and "PP_Calculada" not in df.columns:
+        st.info("Para calcular el balance hídrico, primero debe existir precipitación calculada en la pestaña Precipitación / QC.")
+    else:
+        diario_et = calcular_et_balance_diario(df, latitud_et, capacidad_suelo,
+                                               capacidad_suelo * fraccion_inicial / 100.0)
+        if diario_et.empty:
+            st.info("No hay temperaturas suficientes para el cálculo.")
+        else:
+            st.caption("ET₀ diaria estimada a partir de Tmin/Tmax del MCP9808. La precipitación se agrega por día desde la pestaña de lluvia; si el QC está activado, se utiliza la lluvia que el QC deja pasar.")
+            ultima = diario_et.iloc[-1]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("ET₀ estimada del último día", "—" if pd.isna(ultima["ET0_mm_dia"]) else f"{ultima['ET0_mm_dia']:.2f} mm")
+            m2.metric("Precipitación del último día", "—" if pd.isna(ultima["P_mm"]) else f"{ultima['P_mm']:.2f} mm")
+            m3.metric("Déficit estimado del último día", "—" if pd.isna(ultima["Deficit_hidrico_mm"]) else f"{ultima['Deficit_hidrico_mm']:.2f} mm")
+            m4.metric("Almacenamiento final estimado", f"{ultima['Almacenamiento_final_mm']:.1f} mm")
+
+            fig_et, ax_et = plt.subplots(figsize=(12, 4.5))
+            ax_et.plot(diario_et["Fecha"], diario_et["ET0_mm_dia"], marker="o", label="ET₀ estimada")
+            ax_et.plot(diario_et["Fecha"], diario_et["P_mm"], marker="o", label="Precipitación")
+            ax_et.set_title("ET₀ y precipitación diaria")
+            ax_et.set_ylabel("mm/día")
+            ax_et.set_xlabel("Fecha")
+            ax_et.grid(True, alpha=.25)
+            ax_et.legend()
+            fig_et.autofmt_xdate()
+            fig_et.tight_layout()
+            st.pyplot(fig_et, use_container_width=True)
+
+            fig_bal, ax_bal = plt.subplots(figsize=(12, 4.5))
+            ax_bal.bar(diario_et["Fecha"], diario_et["Almacenamiento_final_mm"], label="Agua almacenada en suelo (estimada)")
+            ax_bal.plot(diario_et["Fecha"], diario_et["Deficit_hidrico_mm"], marker="o", label="Déficit diario estimado")
+            ax_bal.set_title("Balance hídrico simplificado del suelo (modelo de depósito)")
+            ax_bal.set_ylabel("mm")
+            ax_bal.grid(True, alpha=.25)
+            ax_bal.legend()
+            fig_bal.autofmt_xdate()
+            fig_bal.tight_layout()
+            st.pyplot(fig_bal, use_container_width=True)
+            st.dataframe(diario_et.round(2), use_container_width=True, hide_index=True)
+            st.download_button("⬇️ Descargar ET₀ y balance hídrico (CSV)",
+                                data=convert_df_to_csv(diario_et),
+                                file_name="3DPaws_ET0_balance_hidrico.csv", mime="text/csv")
+            st.caption("Limitaciones: el balance usa un depósito de suelo simplificado, sin escorrentía/infiltración explícitas ni coeficiente de cultivo (Kc). No sustituye un balance agrícola validado. Para resultados operativos, use ubicación exacta, sensores calibrados y datos diarios completos; con pocos registros el cálculo es preliminar.")
+
+# 8. Datos
+with tabs[7]:
     mostrar = st.multiselect("Variables a mostrar", options=list(df.columns), default=list(df.columns)[:10])
     st.dataframe(df[mostrar], use_container_width=True, height=450)
 
