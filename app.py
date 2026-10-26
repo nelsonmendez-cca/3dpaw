@@ -154,7 +154,7 @@ def grafico_temperatura(df):
         mask = df["fecha_hora"].notna() & serie.notna() & serie.between(-40, 85)
         if mask.any():
             ax.plot(df.loc[mask, "fecha_hora"], serie.loc[mask], linewidth=1.4,
-                    color="tab:red", label="Temperatura MCP9808")
+                    color="tab:red", label="Temperatura")
             ax.legend(loc="best")
         else:
             ax.text(0.5, 0.5, "Sin registros válidos del MCP9808", transform=ax.transAxes, ha="center")
