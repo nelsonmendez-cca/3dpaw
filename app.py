@@ -143,30 +143,22 @@ def dar_formato_eje_hora(ax):
     ax.grid(True, alpha=.25)
 
 def grafico_temperatura(df):
-    """Grafica las tres temperaturas disponibles, sin asumir que son idénticas."""
+    """Grafica únicamente el sensor MCP9808 como temperatura del aire."""
     fig, ax = plt.subplots(figsize=(12, 4.5))
-    sensores = [
-        ("bmp_temp", "Temperatura BMP", "tab:blue"),
-        ("hum_temp", "Temperatura sensor de humedad", "tab:orange"),
-        ("mcp9808", "Temperatura MCP9808", "tab:red"),
-    ]
-    dibujadas = 0
-    for col, etiqueta, color in sensores:
-        if col not in df.columns:
-            continue
-        serie = pd.to_numeric(df[col], errors="coerce")
+    if "mcp9808" in df.columns:
+        serie = pd.to_numeric(df["mcp9808"], errors="coerce")
         mask = df["fecha_hora"].notna() & serie.notna() & serie.between(-40, 85)
         if mask.any():
-            ax.plot(df.loc[mask, "fecha_hora"], serie.loc[mask], linewidth=1.2,
-                    color=color, label=etiqueta)
-            dibujadas += 1
-    if dibujadas:
-        ax.legend(loc="best")
+            ax.plot(df.loc[mask, "fecha_hora"], serie.loc[mask], linewidth=1.4,
+                    color="tab:red", label="Temperatura")
+            ax.legend(loc="best")
+        else:
+            ax.text(0.5, 0.5, "Sin registros válidos del MCP9808", transform=ax.transAxes, ha="center")
     else:
-        ax.text(0.5, 0.5, "Sin registros válidos de temperatura", transform=ax.transAxes, ha="center")
-    ax.set_title("Temperaturas medidas por los sensores (°C)")
+        ax.text(0.5, 0.5, "No se encontró el sensor MCP9808", transform=ax.transAxes, ha="center")
+    ax.set_title("Temperatura")
     ax.set_xlabel("Hora local (El Salvador)")
-    ax.set_ylabel("Temperatura (°C)")
+    ax.set_ylabel("Grados (°C)")
     dar_formato_eje_hora(ax)
     fig.autofmt_xdate()
     fig.tight_layout()
@@ -477,9 +469,9 @@ with tabs[0]:
         t_ser = pd.to_numeric(df["mcp9808"], errors="coerce").dropna()
         if not t_ser.empty:
             c1, c2, c3 = st.columns(3)
-            c1.metric("Media MCP9808", f"{t_ser.mean():.1f} °C")
-            c2.metric("Mínima MCP9808", f"{t_ser.min():.1f} °C")
-            c3.metric("Máxima MCP9808", f"{t_ser.max():.1f} °C")
+            c1.metric("Media ", f"{t_ser.mean():.1f} °C")
+            c2.metric("Mínima ", f"{t_ser.min():.1f} °C")
+            c3.metric("Máxima ", f"{t_ser.max():.1f} °C")
 
 # 2. Humedad
 with tabs[1]:
@@ -599,69 +591,131 @@ with tabs[5]:
 
 # 7. Evapotranspiración de referencia y balance hídrico simplificado
 with tabs[6]:
-    st.markdown("### 🌱 Evapotranspiración de referencia (ET₀) y balance hídrico")
+    st.markdown("### 🌱 Evapotranspiración y balance hídrico diario")
+    st.markdown(
+        "**¿Qué significa?** La evapotranspiración de referencia (ET₀) estima cuánta agua "
+        "podría perderse hacia la atmósfera por evaporación y transpiración de una superficie de referencia. "
+        "El balance climático diario compara el agua que entra como lluvia con la que se demanda por ET₀."
+    )
     st.warning(
-        "Estimación orientativa con Hargreaves-Samani. Los sensores de luz de esta estación reportan niveles/cuentas, "
-        "no radiación solar calibrada en MJ/m²/día; por eso no se calcula Penman–Monteith FAO-56. "
-        "El resultado depende de que el MCP9808 represente razonablemente la temperatura del aire y de disponer de días completos."
+        "ET₀ es una estimación preliminar por Hargreaves-Samani usando la temperatura del MCP9808 y la latitud. "
+        "Los sensores de luz no están calibrados como radiación solar física. El balance de suelo es ilustrativo: "
+        "no mide directamente la humedad del suelo ni representa todavía un balance agrícola validado."
     )
     c1, c2, c3 = st.columns(3)
     with c1:
-        latitud_et = st.number_input("Latitud de la estación (°; norte positivo)", min_value=-60.0, max_value=60.0,
-                                     value=13.70, step=0.01, format="%.4f",
-                                     help="Cambie el valor por la latitud real de la estación; 13.70° es solo un valor inicial aproximado para El Salvador.")
+        latitud_et = st.number_input(
+            "Latitud de la estación (°; norte positivo)", min_value=-60.0, max_value=60.0,
+            value=13.70, step=0.01, format="%.4f",
+            help="Introduce la latitud real de la estación. 13.70° es solo un valor inicial aproximado para El Salvador."
+        )
     with c2:
-        capacidad_suelo = st.number_input("Capacidad de agua disponible del suelo (mm)", min_value=1.0, max_value=500.0,
-                                          value=100.0, step=5.0,
-                                          help="Supuesto editable. No es una propiedad medida por esta estación.")
+        capacidad_suelo = st.number_input(
+            "Capacidad de almacenamiento del suelo (mm)", min_value=1.0, max_value=500.0,
+            value=100.0, step=5.0,
+            help="Supuesto de ejemplo para el depósito de agua del suelo; no lo mide la estación."
+        )
     with c3:
-        fraccion_inicial = st.slider("Almacenamiento inicial del suelo (%)", min_value=0, max_value=100, value=50, step=5)
+        fraccion_inicial = st.slider(
+            "Agua inicial en el depósito (%)", min_value=0, max_value=100, value=50, step=5,
+            help="Supone cuánta agua hay en el suelo al inicio del periodo analizado."
+        )
 
     if "mcp9808" not in df.columns:
         st.error("No existe la variable mcp9808 para estimar la ET₀.")
     elif "PP_Plot" not in df.columns and "PP_Calculada" not in df.columns:
-        st.info("Para calcular el balance hídrico, primero debe existir precipitación calculada en la pestaña Precipitación / QC.")
+        st.info("Primero debe calcularse la precipitación en la pestaña ‘Precipitación / QC’. El balance no puede calcularse sin lluvia.")
     else:
-        diario_et = calcular_et_balance_diario(df, latitud_et, capacidad_suelo,
-                                               capacidad_suelo * fraccion_inicial / 100.0)
+        diario_et = calcular_et_balance_diario(
+            df, latitud_et, capacidad_suelo,
+            capacidad_suelo * fraccion_inicial / 100.0
+        )
         if diario_et.empty:
             st.info("No hay temperaturas suficientes para el cálculo.")
         else:
-            st.caption("ET₀ diaria estimada a partir de Tmin/Tmax del MCP9808. La precipitación se agrega por día desde la pestaña de lluvia; si el QC está activado, se utiliza la lluvia que el QC deja pasar.")
+            diario_et["Balance_lluvia_menos_ET0_mm"] = diario_et["P_mm"] - diario_et["ET0_mm_dia"]
+            st.markdown("#### 1. Comparación diaria: lluvia frente a demanda atmosférica")
+            st.markdown(
+                "- **Balance positivo:** cayó más lluvia que la ET₀ estimada ese día.\n"
+                "- **Balance negativo:** la ET₀ estimada superó a la lluvia.\n"
+                "- **Cerca de cero:** lluvia y ET₀ fueron similares.\n\n"
+                "Este balance compara lluvia con ET₀; por sí solo no indica exactamente cuánta agua tiene disponible una planta."
+            )
             ultima = diario_et.iloc[-1]
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("ET₀ estimada del último día", "—" if pd.isna(ultima["ET0_mm_dia"]) else f"{ultima['ET0_mm_dia']:.2f} mm")
-            m2.metric("Precipitación del último día", "—" if pd.isna(ultima["P_mm"]) else f"{ultima['P_mm']:.2f} mm")
-            m3.metric("Déficit estimado del último día", "—" if pd.isna(ultima["Deficit_hidrico_mm"]) else f"{ultima['Deficit_hidrico_mm']:.2f} mm")
-            m4.metric("Almacenamiento final estimado", f"{ultima['Almacenamiento_final_mm']:.1f} mm")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("ET₀ estimada", "—" if pd.isna(ultima["ET0_mm_dia"]) else f"{ultima['ET0_mm_dia']:.2f} mm/día")
+            m2.metric("Lluvia registrada", "—" if pd.isna(ultima["P_mm"]) else f"{ultima['P_mm']:.2f} mm")
+            bal_ult = ultima["Balance_lluvia_menos_ET0_mm"]
+            m3.metric("Balance lluvia − ET₀", "—" if pd.isna(bal_ult) else f"{bal_ult:+.2f} mm",
+                      help="Positivo = lluvia mayor que ET₀; negativo = ET₀ mayor que lluvia.")
 
             fig_et, ax_et = plt.subplots(figsize=(12, 4.5))
-            ax_et.plot(diario_et["Fecha"], diario_et["ET0_mm_dia"], marker="o", label="ET₀ estimada")
-            ax_et.plot(diario_et["Fecha"], diario_et["P_mm"], marker="o", label="Precipitación")
-            ax_et.set_title("ET₀ y precipitación diaria")
-            ax_et.set_ylabel("mm/día")
+            ax_et.bar(diario_et["Fecha"], diario_et["P_mm"], label="Lluvia (mm)", alpha=.7, color="tab:blue")
+            ax_et.plot(diario_et["Fecha"], diario_et["ET0_mm_dia"], marker="o", label="ET₀ estimada (mm)", color="tab:orange")
+            ax_et.set_title("Cada día: ¿llovió más o menos de lo que se estima que se evapotranspira?")
+            ax_et.set_ylabel("Milímetros (mm)")
             ax_et.set_xlabel("Fecha")
-            ax_et.grid(True, alpha=.25)
+            ax_et.grid(True, axis="y", alpha=.25)
             ax_et.legend()
             fig_et.autofmt_xdate()
             fig_et.tight_layout()
             st.pyplot(fig_et, use_container_width=True)
 
+            st.markdown("#### 2. Depósito teórico de agua en el suelo")
+            st.markdown(
+                "Imagina un depósito con capacidad limitada: la lluvia lo llena y la ET real estimada le quita agua. "
+                "Si el depósito llega al máximo, el agua sobrante se cuenta como **excedente**; si no alcanza el agua "
+                "para cubrir la ET₀, la diferencia se registra como **déficit estimado**. La capacidad y el agua inicial "
+                "son supuestos editables, no mediciones de la estación."
+            )
+            b1, b2, b3 = st.columns(3)
+            b1.metric("Agua final estimada en el suelo", f"{ultima['Almacenamiento_final_mm']:.1f} mm")
+            b2.metric("Déficit estimado del día", "—" if pd.isna(ultima["Deficit_hidrico_mm"]) else f"{ultima['Deficit_hidrico_mm']:.2f} mm")
+            b3.metric("Excedente estimado del día", "—" if pd.isna(ultima["Excedente_mm"]) else f"{ultima['Excedente_mm']:.2f} mm")
+
             fig_bal, ax_bal = plt.subplots(figsize=(12, 4.5))
-            ax_bal.bar(diario_et["Fecha"], diario_et["Almacenamiento_final_mm"], label="Agua almacenada en suelo (estimada)")
-            ax_bal.plot(diario_et["Fecha"], diario_et["Deficit_hidrico_mm"], marker="o", label="Déficit diario estimado")
-            ax_bal.set_title("Balance hídrico simplificado del suelo (modelo de depósito)")
-            ax_bal.set_ylabel("mm")
-            ax_bal.grid(True, alpha=.25)
+            ax_bal.bar(diario_et["Fecha"], diario_et["Almacenamiento_final_mm"],
+                       label="Agua almacenada estimada", color="tab:green", alpha=.75)
+            ax_bal.axhline(capacidad_suelo, linestyle="--", color="black", linewidth=1,
+                           label=f"Capacidad configurada: {capacidad_suelo:.0f} mm")
+            ax_bal.set_ylim(0, max(capacidad_suelo * 1.12, 1))
+            ax_bal.set_title("Cantidad teórica de agua guardada en el suelo al final de cada día")
+            ax_bal.set_ylabel("Agua almacenada (mm)")
+            ax_bal.set_xlabel("Fecha")
+            ax_bal.grid(True, axis="y", alpha=.25)
             ax_bal.legend()
             fig_bal.autofmt_xdate()
             fig_bal.tight_layout()
             st.pyplot(fig_bal, use_container_width=True)
-            st.dataframe(diario_et.round(2), use_container_width=True, hide_index=True)
-            st.download_button("⬇️ Descargar ET₀ y balance hídrico (CSV)",
-                                data=convert_df_to_csv(diario_et),
-                                file_name="3DPaws_ET0_balance_hidrico.csv", mime="text/csv")
-            st.caption("Limitaciones: el balance usa un depósito de suelo simplificado, sin escorrentía/infiltración explícitas ni coeficiente de cultivo (Kc). No sustituye un balance agrícola validado. Para resultados operativos, use ubicación exacta, sensores calibrados y datos diarios completos; con pocos registros el cálculo es preliminar.")
+
+            st.markdown("#### 3. Tabla diaria")
+            tabla = diario_et.rename(columns={
+                "Fecha": "Fecha", "Tmin_C": "Temperatura mínima (°C)",
+                "Tmax_C": "Temperatura máxima (°C)", "Tmedia_C": "Temperatura media (°C)",
+                "P_mm": "Lluvia (mm)", "ET0_mm_dia": "ET₀ estimada (mm/día)",
+                "Balance_lluvia_menos_ET0_mm": "Balance lluvia − ET₀ (mm)",
+                "ET_real_estimada_mm": "ET cubierta por depósito (mm)",
+                "Deficit_hidrico_mm": "Déficit estimado (mm)",
+                "Excedente_mm": "Excedente estimado (mm)",
+                "Almacenamiento_inicial_mm": "Agua al inicio (mm)",
+                "Almacenamiento_final_mm": "Agua al final (mm)",
+            })
+            columnas_tabla = [
+                "Fecha", "Temperatura mínima (°C)", "Temperatura máxima (°C)",
+                "Lluvia (mm)", "ET₀ estimada (mm/día)", "Balance lluvia − ET₀ (mm)",
+                "Déficit estimado (mm)", "Excedente estimado (mm)", "Agua al final (mm)"
+            ]
+            st.dataframe(tabla[[c for c in columnas_tabla if c in tabla.columns]].round(2),
+                         use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Descargar tabla diaria (CSV)", data=convert_df_to_csv(tabla),
+                file_name="3DPaws_ET0_balance_hidrico.csv", mime="text/csv"
+            )
+            st.caption(
+                "Importante: la ET₀ diaria necesita un día de datos suficientemente completo. Si el archivo contiene solo "
+                "parte del día actual, sus máximas/mínimas y el cálculo de ese día son provisionales. La lluvia debe estar "
+                "correctamente calibrada (1 vuelco = 0.2 mm, según la configuración) y el filtro de lluvia ficticia es experimental."
+            )
 
 # 8. Datos
 with tabs[7]:
