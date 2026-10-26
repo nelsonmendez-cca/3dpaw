@@ -77,8 +77,7 @@ def cargar_dat(file_bytes):
         if col not in columnas_fecha:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    columnas_obligatorias = {"year", "mon", "day", "hour", "min"}
-    faltan_fecha = columnas_obligatorias - set(df.columns)
+    faltan_fecha = columnas_fecha - set(df.columns)
     if faltan_fecha:
         raise ValueError(
             "El archivo no tiene el formato 3DPaws esperado. "
@@ -87,12 +86,10 @@ def cargar_dat(file_bytes):
         )
 
     # Fecha/hora ajustada a El Salvador (UTC-6)
-    df["fecha_hora"] = (
-        pd.to_datetime(
-            dict(year=df["year"], month=df["mon"], day=df["day"], hour=df["hour"], minute=df["min"]),
-            errors="coerce",
-        ) - pd.Timedelta(hours=6)
-    )
+    df["fecha_hora"] = pd.to_datetime(
+        dict(year=df["year"], month=df["mon"], day=df["day"], hour=df["hour"], minute=df["min"]),
+        errors="coerce",
+    ) - pd.Timedelta(hours=6)
 
     # Limpieza de nulos (-999.99 o similares)
     for col in df.columns:
@@ -106,6 +103,14 @@ def cargar_dat(file_bytes):
         df["punto_rocio"] = df.apply(
             lambda r: calcular_punto_rocio_magnus(r["mcp9808"], r["hum_hum"]), axis=1
         )
+
+    # Precalculo automático de precipitación (para evitar dependencias entre pestañas)
+    if "tipping" in df.columns:
+        df["tipping_diff"] = pd.to_numeric(df["tipping"], errors="coerce").diff().fillna(0)
+        df.loc[df["tipping_diff"] < 0, "tipping_diff"] = 0
+        df["PP_Calculada"] = df["tipping_diff"] * 0.2  # Valor por defecto (0.2 mm/vuelco)
+        df["Es_Lluvia_Real"] = df.apply(evaluar_control_calidad_lluvia, axis=1)
+        df["PP_Plot"] = df.apply(lambda r: r["PP_Calculada"] if r["Es_Lluvia_Real"] else 0.0, axis=1)
 
     return df
 
@@ -135,7 +140,7 @@ def rango_texto(df):
     return f"{t.min():%d/%m/%Y %H:%M} → {t.max():%d/%m/%Y %H:%M}"
 
 # ---------------------------------------------------------------------
-# Funciones de Gráficos (Eje X en formato 12 Horas, sin marcas de fecha)
+# Funciones de Gráficos
 # ---------------------------------------------------------------------
 def dar_formato_eje_hora(ax):
     """Aplica formato de 12 horas al eje X eliminando la fecha."""
@@ -143,20 +148,19 @@ def dar_formato_eje_hora(ax):
     ax.grid(True, alpha=.25)
 
 def grafico_temperatura(df):
-    """Grafica de temperatura del aire."""
     fig, ax = plt.subplots(figsize=(12, 4.5))
     if "mcp9808" in df.columns:
         serie = pd.to_numeric(df["mcp9808"], errors="coerce")
         mask = df["fecha_hora"].notna() & serie.notna() & serie.between(-40, 85)
         if mask.any():
             ax.plot(df.loc[mask, "fecha_hora"], serie.loc[mask], linewidth=1.4,
-                    color="tab:red", label="Temperatura ")
+                    color="tab:red", label="Temperatura MCP9808")
             ax.legend(loc="best")
         else:
             ax.text(0.5, 0.5, "Sin registros válidos del MCP9808", transform=ax.transAxes, ha="center")
     else:
         ax.text(0.5, 0.5, "No se encontró el sensor MCP9808", transform=ax.transAxes, ha="center")
-    ax.set_title("Temperatura")
+    ax.set_title("Temperatura del Aire (°C)")
     ax.set_xlabel("Hora local (El Salvador)")
     ax.set_ylabel("Grados (°C)")
     dar_formato_eje_hora(ax)
@@ -170,7 +174,7 @@ def grafico_linea(df, columnas, etiquetas, titulo, ylabel):
         if col in df.columns:
             ax.plot(df["fecha_hora"], df[col], linewidth=1.3, label=lbl)
     ax.set_title(titulo)
-    ax.set_xlabel("Hora")
+    ax.set_xlabel("Hora local")
     ax.set_ylabel(ylabel)
     ax.legend()
     dar_formato_eje_hora(ax)
@@ -204,7 +208,6 @@ def dibujar_pluviometro(valor_mm, capacidad=100):
     return fig
 
 def grafico_viento(df):
-    """Rosa de viento; informa calma cuando no existen velocidades positivas."""
     if "wind_dir" not in df.columns or "wind_speed" not in df.columns:
         return None, {"estado": "faltan_columnas"}
 
@@ -240,7 +243,7 @@ def grafico_viento(df):
         pred_nombre = nombres[idx_pred]
         pred_grados = float(sectores[idx_pred])
         pred_pct = float(porcentajes.iloc[idx_pred])
-        # La flecha solo se muestra si la observación más reciente tiene velocidad positiva.
+
         latest = w.dropna(subset=["direccion", "velocidad", "fecha"])
         latest = latest[latest["velocidad"] > 0]
         if not latest.empty:
@@ -274,9 +277,11 @@ def grafico_viento(df):
                  "predominante": pred_nombre, "predominante_grados": pred_grados,
                  "predominante_porcentaje": pred_pct}
 
-
+# ---------------------------------------------------------------------
+# Cálculo Adaptado de Evapotranspiración (FAO-56 Hargreaves-Samani)
+# ---------------------------------------------------------------------
 def radiacion_extraterrestre_mj_dia(fecha, latitud_grados):
-    """Radiación extraterrestre diaria Ra (MJ m-2 día-1), FAO-56."""
+    """Calcula Radiación Extraterrestre Ra (MJ m-2 día-1) según FAO-56."""
     j = pd.Timestamp(fecha).dayofyear
     phi = np.deg2rad(float(latitud_grados))
     dr = 1 + 0.033 * np.cos(2 * np.pi * j / 365)
@@ -287,47 +292,83 @@ def radiacion_extraterrestre_mj_dia(fecha, latitud_grados):
     ra = (24 * 60 / np.pi) * gsc * dr * (ws * np.sin(phi) * np.sin(delta) + np.cos(phi) * np.cos(delta) * np.sin(ws))
     return max(0.0, float(ra))
 
-
 def calcular_et_balance_diario(df, latitud, capacidad_suelo, almacenamiento_inicial):
-    """ET0 Hargreaves-Samani y balance de depósito de suelo simplificado por día."""
+    """
+    Calcula ET0 Hargreaves-Samani robusto para estaciones 3DPaws de bajo costo.
+    Filtra automáticamente días con registros incompletos para no sesgar Tmin/Tmax.
+    """
     if "mcp9808" not in df.columns:
         return pd.DataFrame()
+
     datos = df.dropna(subset=["fecha_hora"]).copy()
     datos["fecha"] = datos["fecha_hora"].dt.floor("D")
     datos["temp_ref"] = pd.to_numeric(datos["mcp9808"], errors="coerce")
-    diario = datos.groupby("fecha").agg(Tmin_C=("temp_ref", "min"), Tmax_C=("temp_ref", "max"), n_temp=("temp_ref", "count"))
+
+    # Filtrar outliers de temperatura por fallos de lectura I2C del sensor
+    datos.loc[~datos["temp_ref"].between(-5, 60), "temp_ref"] = np.nan
+
+    # Agrupación diaria
+    diario = datos.groupby("fecha").agg(
+        Tmin_C=("temp_ref", "min"),
+        Tmax_C=("temp_ref", "max"),
+        n_temp=("temp_ref", "count")
+    )
+
+    # Identificar precipitación acumulada por día
     if "PP_Plot" in datos.columns:
         diario["P_mm"] = datos.groupby("fecha")["PP_Plot"].sum(min_count=1).fillna(0)
     elif "PP_Calculada" in datos.columns:
         diario["P_mm"] = datos.groupby("fecha")["PP_Calculada"].sum(min_count=1).fillna(0)
     else:
-        diario["P_mm"] = np.nan
+        diario["P_mm"] = 0.0
+
+    # Estimación de la frecuencia de muestreo esperada (ej: 144 lecturas para intervalos de 10 min)
+    mediana_registros = diario["n_temp"].median()
+    umbral_minimo = max(12, mediana_registros * 0.70)  # Requerir al menos 70% de datos en el día
+
     diario["Tmedia_C"] = (diario["Tmax_C"] + diario["Tmin_C"]) / 2
     diario["Ra_MJ_m2_dia"] = [radiacion_extraterrestre_mj_dia(f, latitud) for f in diario.index]
     amplitud = (diario["Tmax_C"] - diario["Tmin_C"]).clip(lower=0)
-    diario["ET0_mm_dia"] = 0.0023 * (diario["Tmedia_C"] + 17.8).clip(lower=0) * np.sqrt(amplitud) * diario["Ra_MJ_m2_dia"]
-    diario["ET0_mm_dia"] = diario["ET0_mm_dia"].where(diario["n_temp"] > 0)
 
+    # Ecuación Hargreaves-Samani: ET0 = 0.0023 * (Tmean + 17.8) * (Tmax - Tmin)^0.5 * Ra
+    diario["ET0_mm_dia"] = 0.0023 * (diario["Tmedia_C"] + 17.8).clip(lower=0) * np.sqrt(amplitud) * diario["Ra_MJ_m2_dia"]
+
+    # Anular cálculo en días incompletos para prevenir errores
+    diario.loc[diario["n_temp"] < umbral_minimo, "ET0_mm_dia"] = np.nan
+
+    # Modelado simplificado del depósito de agua en suelo
     almacen = float(almacenamiento_inicial)
     almacen_ini, eta_real, deficit, excedente, almacen_fin = [], [], [], [], []
+
     for _, row in diario.iterrows():
         almacen_ini.append(almacen)
         p = row["P_mm"]
         et0 = row["ET0_mm_dia"]
+
         if pd.isna(p) or pd.isna(et0):
-            eta_real.append(np.nan); deficit.append(np.nan); excedente.append(np.nan); almacen_fin.append(almacen)
+            eta_real.append(np.nan)
+            deficit.append(np.nan)
+            excedente.append(np.nan)
+            almacen_fin.append(almacen)
             continue
+
         agua = almacen + max(0.0, float(p))
         eta = min(max(0.0, float(et0)), agua)
         sobrante = max(0.0, agua - eta - capacidad_suelo)
         almacen = min(capacidad_suelo, max(0.0, agua - eta))
-        eta_real.append(eta); deficit.append(max(0.0, float(et0) - eta)); excedente.append(sobrante); almacen_fin.append(almacen)
+
+        eta_real.append(eta)
+        deficit.append(max(0.0, float(et0) - eta))
+        excedente.append(sobrante)
+        almacen_fin.append(almacen)
+
     diario["Almacenamiento_inicial_mm"] = almacen_ini
     diario["ET_real_estimada_mm"] = eta_real
     diario["Deficit_hidrico_mm"] = deficit
     diario["Excedente_mm"] = excedente
     diario["Almacenamiento_final_mm"] = almacen_fin
     diario.index.name = "Fecha"
+
     return diario.reset_index()
 
 # ---------------------------------------------------------------------
@@ -464,7 +505,7 @@ tabs = st.tabs([
 
 # 1. Temperatura
 with tabs[0]:
-    st.pyplot(grafico_temperatura(df), use_container_width=True)
+    st.pyplot(grafico_temperatura(df))
     if "mcp9808" in df.columns:
         t_ser = pd.to_numeric(df["mcp9808"], errors="coerce").dropna()
         if not t_ser.empty:
@@ -476,10 +517,7 @@ with tabs[0]:
 # 2. Humedad
 with tabs[1]:
     if "hum_hum" in df.columns:
-        st.pyplot(
-            grafico_linea(df, ["hum_hum"], ["Humedad Relativa"], "Humedad Relativa (%)", "Humedad (%)"),
-            use_container_width=True,
-        )
+        st.pyplot(grafico_linea(df, ["hum_hum"], ["Humedad Relativa"], "Humedad Relativa (%)", "Humedad (%)"))
         h_ser = df["hum_hum"].dropna()
         if not h_ser.empty:
             c1, c2, c3 = st.columns(3)
@@ -492,10 +530,7 @@ with tabs[1]:
 # 3. Presión
 with tabs[2]:
     if "bmp_pres" in df.columns:
-        st.pyplot(
-            grafico_linea(df, ["bmp_pres"], ["Presión Atmosférica"], "Presión Atmosférica (hPa)", "Presión (hPa)"),
-            use_container_width=True,
-        )
+        st.pyplot(grafico_linea(df, ["bmp_pres"], ["Presión Atmosférica"], "Presión Atmosférica (hPa)", "Presión (hPa)"))
     else:
         st.warning("No se encontró el registro de presión.")
 
@@ -504,10 +539,7 @@ with tabs[3]:
     cols_luz = [c for c in ["vis_light", "uv_light", "ir_light"] if c in df.columns]
     etiquetas_luz = ["Luz Visible", "Radiación UV", "Infrarrojo"]
     if cols_luz:
-        st.pyplot(
-            grafico_linea(df, cols_luz, etiquetas_luz[:len(cols_luz)], "Sensores de Radiación e Irradiancia", "Nivel / Cuentas"),
-            use_container_width=True,
-        )
+        st.pyplot(grafico_linea(df, cols_luz, etiquetas_luz[:len(cols_luz)], "Sensores de Radiación e Irradiancia", "Nivel / Cuentas"))
     else:
         st.warning("No se encontraron registros de radiación.")
 
@@ -517,42 +549,27 @@ with tabs[4]:
     with c1:
         fig_viento, info_viento = grafico_viento(df)
         if fig_viento:
-            st.pyplot(fig_viento, use_container_width=True)
+            st.pyplot(fig_viento)
             if info_viento and pd.notna(info_viento.get("velocidad_actual", np.nan)):
                 st.metric("Última velocidad registrada", f"{info_viento['velocidad_actual']:.2f} m/s",
-                          help="Si es 0 m/s, se interpreta como calma; no se presenta como dirección actual una veleta sin viento.")
+                          help="Si es 0 m/s, se interpreta como calma.")
             if info_viento and info_viento.get("estado") == "calma":
-                st.info("Calma o ausencia de viento medido: se conserva el gráfico y no se inventa una dirección actual.")
+                st.info("Calma o ausencia de viento medido.")
         else:
             st.warning("No se encontraron las columnas wind_dir y wind_speed en el archivo.")
     with c2:
         if "wind_speed" in df.columns:
-            st.pyplot(
-                grafico_linea(df, ["wind_speed"], ["Velocidad"], "Velocidad del Viento", "Velocidad (m/s)"),
-                use_container_width=True,
-            )
+            st.pyplot(grafico_linea(df, ["wind_speed"], ["Velocidad"], "Velocidad del Viento", "Velocidad (m/s)"))
 
-# 6. Precipitación y Control de Calidad (Lluvia Ficticia)
+# 6. Precipitación y Control de Calidad
 with tabs[5]:
     st.markdown("### 🌧️ Precipitación y Control de Calidad (QC)")
 
     if "tipping" in df.columns:
-        aplicar_qc = st.checkbox("Activar filtro heurístico de lluvia (experimental)", value=True)
-        st.caption("Este filtro usa humedad y punto de rocío como indicios, no confirma por sí solo lluvia real. Compare los datos filtrados con el pluviómetro y observación local antes de usar el acumulado como dato oficial.")
+        aplicar_qc = st.checkbox("Activar filtro heurístico de lluvia", value=True)
+        factor = st.number_input("Factor de conversión (mm por vuelco)", min_value=0.001, value=0.2, step=0.001, format="%.3f")
 
-        factor = st.number_input(
-            "Factor de conversión (mm por vuelco)",
-            min_value=0.001,
-            value=0.2,
-            step=0.001,
-            format="%.3f",
-        )
-
-        df["tipping_diff"] = pd.to_numeric(df["tipping"], errors="coerce").diff().fillna(0)
-        df.loc[df["tipping_diff"] < 0, "tipping_diff"] = 0
         df["PP_Calculada"] = df["tipping_diff"] * factor
-
-        df["Es_Lluvia_Real"] = df.apply(evaluar_control_calidad_lluvia, axis=1)
 
         if aplicar_qc:
             df["PP_Plot"] = df.apply(lambda r: r["PP_Calculada"] if r["Es_Lluvia_Real"] else 0.0, axis=1)
@@ -570,7 +587,7 @@ with tabs[5]:
 
         c1, c2 = st.columns([1, 2])
         with c1:
-            st.pyplot(dibujar_pluviometro(total_validado, 100), use_container_width=True)
+            st.pyplot(dibujar_pluviometro(total_validado, 100))
 
         with c2:
             fig, ax = plt.subplots(figsize=(10, 4.8))
@@ -585,44 +602,41 @@ with tabs[5]:
             dar_formato_eje_hora(ax)
             fig.autofmt_xdate()
             fig.tight_layout()
-            st.pyplot(fig, use_container_width=True)
+            st.pyplot(fig)
     else:
-        st.warning("No se encontró el registro 'tipping' para procesar la precipitación.")
+        st.warning("No se encontró la variable 'tipping' en el archivo.")
 
-# 7. Evapotranspiración y agua estimada a partir de lluvia reciente
+# 7. Evapotranspiración y agua estimada (Adaptado Hargreaves-Samani)
 with tabs[6]:
-    st.markdown("### 🌱 Agua aportada por la lluvia reciente")
+    st.markdown("### 🌱 Evapotranspiración de Referencia (ET₀) y Balance Hídrico")
     st.caption(
-        "Estimación orientativa para condiciones de El Salvador. Se calcula ET₀ con Hargreaves–Samani "
-        "y se compara con la precipitación registrada en los últimos días disponibles. No sustituye "
-        "una medición de humedad del suelo."
+        "Para estaciones de bajo costo (3DPaws), la FAO valida el uso del método **Hargreaves-Samani**. "
+        "Este método requiere únicamente la temperatura del aire (sensor MCP9808) y la radiación extraterrestre teórica según la latitud."
     )
 
     if "mcp9808" not in df.columns:
         st.error("No se encuentra el sensor MCP9808; no es posible estimar la evapotranspiración.")
-    elif "PP_Plot" not in df.columns and "PP_Calculada" not in df.columns:
-        st.info("Primero abre la pestaña ‘Precipitación / QC’ para calcular la lluvia del registro.")
     else:
-        # Coordenada por defecto representativa de El Salvador; debe ajustarse a la estación.
         c1, c2, c3 = st.columns([1.1, 1, 1])
         with c1:
             latitud_et = st.number_input(
                 "Latitud de la estación (°N)", min_value=12.0, max_value=15.0,
                 value=13.70, step=0.01, format="%.4f",
-                help="13.70° es un valor aproximado para El Salvador. Cambia al valor real de tu estación."
+                help="13.70° N es una latitud central de referencia para El Salvador."
             )
         with c2:
             dias_analisis = st.selectbox("Periodo reciente", [3, 7, 14, 30], index=1, format_func=lambda x: f"Últimos {x} días")
         with c3:
             capacidad_suelo = st.number_input(
-                "Capacidad teórica del suelo (mm)", min_value=10.0, max_value=300.0,
+                "Capacidad del suelo / Depósito (mm)", min_value=10.0, max_value=300.0,
                 value=100.0, step=10.0,
-                help="Supuesto ilustrativo; no lo mide la estación."
+                help="Reserva máxima de agua retenible en la zona radicular (ej. 100 mm)."
             )
 
         diario_completo = calcular_et_balance_diario(df, latitud_et, capacidad_suelo, 0.0)
+
         if diario_completo.empty:
-            st.warning("No hay temperaturas válidas para calcular ET₀.")
+            st.warning("No hay suficientes datos válidos de temperatura para calcular la ET₀.")
         else:
             diario_completo["Fecha"] = pd.to_datetime(diario_completo["Fecha"])
             ultima_fecha = diario_completo["Fecha"].max()
@@ -630,23 +644,28 @@ with tabs[6]:
             diario_et = diario_completo[diario_completo["Fecha"] >= inicio_periodo].copy().reset_index(drop=True)
             diario_et["Balance_mm"] = diario_et["P_mm"] - diario_et["ET0_mm_dia"]
 
-            # Recalcular el depósito empezando en cero al inicio de la ventana: el resultado
-            # representa solo el aporte neto modelado durante el periodo seleccionado.
+            # Recálculo secuencial para el período seleccionado
             almacen = 0.0
             almacen_fin, et_real, deficit, excedente = [], [], [], []
             for _, fila in diario_et.iterrows():
                 p_mm, et0 = fila["P_mm"], fila["ET0_mm_dia"]
                 if pd.isna(p_mm) or pd.isna(et0):
-                    almacen_fin.append(np.nan); et_real.append(np.nan); deficit.append(np.nan); excedente.append(np.nan)
+                    almacen_fin.append(np.nan)
+                    et_real.append(np.nan)
+                    deficit.append(np.nan)
+                    excedente.append(np.nan)
                     continue
+
                 agua_antes_et = almacen + max(0.0, float(p_mm))
                 et_cubierta = min(max(0.0, float(et0)), agua_antes_et)
                 sobrante = max(0.0, agua_antes_et - et_cubierta - capacidad_suelo)
                 almacen = min(capacidad_suelo, max(0.0, agua_antes_et - et_cubierta))
+
                 almacen_fin.append(almacen)
                 et_real.append(et_cubierta)
                 deficit.append(max(0.0, float(et0) - et_cubierta))
                 excedente.append(sobrante)
+
             diario_et["Agua_estimada_mm"] = almacen_fin
             diario_et["ET_cubierta_mm"] = et_real
             diario_et["Deficit_mm"] = deficit
@@ -656,68 +675,53 @@ with tabs[6]:
             et_total = diario_et["ET0_mm_dia"].sum(min_count=1)
             balance_total = diario_et["Balance_mm"].sum(min_count=1)
             agua_final = diario_et["Agua_estimada_mm"].dropna()
-            fecha_inicio_real = diario_et["Fecha"].min()
-            fecha_fin_real = diario_et["Fecha"].max()
 
-            st.markdown(f"**Periodo analizado:** {fecha_inicio_real:%d/%m/%Y} – {fecha_fin_real:%d/%m/%Y}")
+            st.markdown(f"**Periodo analizado:** {diario_et['Fecha'].min():%d/%m/%Y} – {diario_et['Fecha'].max():%d/%m/%Y}")
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Lluvia acumulada", "—" if pd.isna(lluvia_total) else f"{lluvia_total:.1f} mm")
             k2.metric("ET₀ acumulada", "—" if pd.isna(et_total) else f"{et_total:.1f} mm")
             k3.metric("Balance lluvia − ET₀", "—" if pd.isna(balance_total) else f"{balance_total:+.1f} mm")
-            k4.metric("Agua neta estimada restante", "—" if agua_final.empty else f"{agua_final.iloc[-1]:.1f} mm")
+            k4.metric("Reserva estimada en suelo", "—" if agua_final.empty else f"{agua_final.iloc[-1]:.1f} mm")
 
-            st.markdown("#### ¿Cómo leer el resultado?")
-            st.markdown(
-                "- **Lluvia acumulada:** agua medida por el pluviómetro durante el periodo.\n"
-                "- **ET₀ acumulada:** demanda atmosférica estimada a partir de la temperatura.\n"
-                "- **Balance lluvia − ET₀:** positivo significa que la lluvia superó la demanda; negativo, que la demanda fue mayor.\n"
-                "- **Agua neta estimada restante:** simulación sencilla que empieza con el depósito vacío, suma lluvia, resta ET₀ y limita el almacenamiento a la capacidad elegida."
-            )
-
+            # Gráficos de ET y Balance
             fig, ax = plt.subplots(figsize=(11, 4.2))
-            ax.bar(diario_et["Fecha"], diario_et["P_mm"], color="#3b82f6", alpha=.8, label="Lluvia registrada")
-            ax.plot(diario_et["Fecha"], diario_et["ET0_mm_dia"], color="#f97316", marker="o", linewidth=2, label="ET₀ estimada")
+            ax.bar(diario_et["Fecha"], diario_et["P_mm"], color="#3b82f6", alpha=.8, label="Lluvia (mm)")
+            ax.plot(diario_et["Fecha"], diario_et["ET0_mm_dia"], color="#f97316", marker="o", linewidth=2, label="ET₀ Hargreaves (mm/día)")
             ax.set_ylabel("mm por día")
             ax.set_xlabel("Fecha")
-            ax.set_title("Lluvia y evapotranspiración por día")
+            ax.set_title("Evapotranspiración de Referencia vs. Lluvia Diaria")
             ax.grid(axis="y", alpha=.22)
             ax.legend(frameon=False, ncol=2)
             fig.autofmt_xdate()
             fig.tight_layout()
-            st.pyplot(fig, use_container_width=True)
+            st.pyplot(fig)
 
             fig2, ax2 = plt.subplots(figsize=(11, 3.4))
             ax2.bar(diario_et["Fecha"], diario_et["Agua_estimada_mm"], color="#16a34a", alpha=.8)
-            ax2.axhline(capacidad_suelo, color="#475569", linestyle="--", linewidth=1.3, label=f"Capacidad supuesta: {capacidad_suelo:.0f} mm")
+            ax2.axhline(capacidad_suelo, color="#475569", linestyle="--", linewidth=1.3, label=f"Capacidad del depósito: {capacidad_suelo:.0f} mm")
             ax2.set_ylim(0, max(capacidad_suelo * 1.12, 1))
-            ax2.set_ylabel("mm almacenados (modelo)")
-            ax2.set_title("Agua neta que quedaría en el depósito teórico")
+            ax2.set_ylabel("Reserva de agua (mm)")
+            ax2.set_title("Nivel del Depósito Teórico de Agua en Suelo")
             ax2.grid(axis="y", alpha=.22)
             ax2.legend(frameon=False)
             fig2.autofmt_xdate()
             fig2.tight_layout()
-            st.pyplot(fig2, use_container_width=True)
+            st.pyplot(fig2)
 
             tabla = diario_et[["Fecha", "Tmin_C", "Tmax_C", "P_mm", "ET0_mm_dia", "Balance_mm", "Agua_estimada_mm", "Deficit_mm", "Excedente_mm"]].rename(columns={
-                "Tmin_C": "T mínima MCP9808 (°C)", "Tmax_C": "T máxima MCP9808 (°C)",
-                "P_mm": "Lluvia (mm)", "ET0_mm_dia": "ET₀ estimada (mm/día)",
-                "Balance_mm": "Lluvia − ET₀ (mm)", "Agua_estimada_mm": "Agua neta estimada restante (mm)",
-                "Deficit_mm": "Demanda no cubierta (mm)", "Excedente_mm": "Excedente sobre capacidad (mm)"
+                "Tmin_C": "T Mín (°C)", "Tmax_C": "T Máx (°C)",
+                "P_mm": "Lluvia (mm)", "ET0_mm_dia": "ET₀ Estimada (mm/día)",
+                "Balance_mm": "Balance (mm)", "Agua_estimada_mm": "Reserva Suelo (mm)",
+                "Deficit_mm": "Déficit (mm)", "Excedente_mm": "Excedente (mm)"
             })
-            st.markdown("#### Detalle por día")
+            st.markdown("#### Detalle por Día")
             st.dataframe(tabla.round(2), use_container_width=True, hide_index=True)
             st.download_button(
-                "⬇️ Descargar balance reciente (CSV)", data=convert_df_to_csv(tabla),
-                file_name="3DPaws_balance_hidrico_reciente.csv", mime="text/csv"
-            )
-            st.caption(
-                "Estimación preliminar: Hargreaves–Samani necesita temperaturas representativas de un día completo; "
-                "el día más reciente puede ser parcial. El modelo supone que toda la lluvia registrada entra al depósito "
-                "y no considera escorrentía, drenaje profundo, tipo de cultivo ni humedad real del suelo. "
-                "La latitud predeterminada es aproximada para El Salvador; ajusta la ubicación exacta de la estación."
+                "⬇️ Descargar balance hídrico (CSV)", data=convert_df_to_csv(tabla),
+                file_name="3DPaws_balance_hidrico.csv", mime="text/csv"
             )
 
-# 8. Datos
+# 8. Datos Raw
 with tabs[7]:
     mostrar = st.multiselect("Variables a mostrar", options=list(df.columns), default=list(df.columns)[:10])
     st.dataframe(df[mostrar], use_container_width=True, height=450)
