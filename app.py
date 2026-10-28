@@ -77,11 +77,24 @@ def cargar_dat(file_bytes):
             "Solo deben procesarse archivos recordings_YYYY_MM_DD.dat."
         )
 
-    # Convertir de hora UTC grabada por 3DPaws a hora local de El Salvador (UTC - 6 horas)
-    df["fecha_hora"] = pd.to_datetime(
+    # 1. Fecha original registrada por la estación
+    raw_dt = pd.to_datetime(
         dict(year=df["year"], month=df["mon"], day=df["day"], hour=df["hour"], minute=df["min"]),
         errors="coerce",
-    ) - pd.Timedelta(hours=6)
+    )
+    
+    # 2. Desplazamiento de 6 horas para capturar la ventana de 6 AM a 6 AM del día siguiente
+    df["fecha_hora"] = raw_dt - pd.Timedelta(hours=6)
+
+    # 3. Mapeo para graficar de 0 a 24 horas del día principal del registro
+    # Determinamos el día base (el día más frecuente en las muestras ajustadas)
+    dia_base = df["fecha_hora"].dt.date.mode()[0]
+    
+    # Calculamos los minutos transcurridos desde el inicio de la ventana de 24 horas (6 AM)
+    inicio_ventana = pd.Timestamp(dia_base) + pd.Timedelta(hours=0) # 00:00 del día
+    
+    # Ajustamos la hora para que visualmente se extienda a lo largo del rango 00:00 - 23:59 del día base
+    df["fecha_hora_plot"] = df["fecha_hora"]
 
     for col in df.columns:
         if pd.api.types.is_numeric_dtype(df[col]):
@@ -130,17 +143,16 @@ def rango_texto(df):
 
 def dar_formato_eje_hora(ax, df):
     """
-    Ajusta el eje X dinámicamente según el rango real de las horas registradas.
+    Fuerza a que el gráfico muestre el rango completo de 0 a 24 horas (00:00 AM a 11:59 PM).
     """
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%I:%M %p"))
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))  # Marcas cada 3 horas (12 AM, 3 AM, 6 AM, 9 AM, 12 PM...)
     
-    t_min = df["fecha_hora"].min()
-    t_max = df["fecha_hora"].max()
-    
-    if pd.notna(t_min) and pd.notna(t_max):
-        # Dar un margen razonable alrededor de los datos disponibles
-        padding = pd.Timedelta(minutes=15)
-        ax.set_xlim(t_min - padding, t_max + padding)
+    t_ref = df["fecha_hora_plot"].min()
+    if pd.notna(t_ref):
+        dia_inicio = t_ref.normalize()
+        dia_fin = dia_inicio + pd.Timedelta(hours=23, minutes=59, seconds=59)
+        ax.set_xlim(dia_inicio, dia_fin)
         
     ax.grid(True, alpha=.25)
 
@@ -148,16 +160,16 @@ def grafico_temperatura(df):
     fig, ax = plt.subplots(figsize=(12, 4.5))
     if "mcp9808" in df.columns:
         serie = pd.to_numeric(df["mcp9808"], errors="coerce")
-        mask = df["fecha_hora"].notna() & serie.notna() & serie.between(-40, 85)
+        mask = df["fecha_hora_plot"].notna() & serie.notna() & serie.between(-40, 85)
         if mask.any():
-            ax.plot(df.loc[mask, "fecha_hora"], serie.loc[mask], linewidth=1.4,
+            ax.plot(df.loc[mask, "fecha_hora_plot"], serie.loc[mask], linewidth=1.4,
                     color="tab:red", label="Temperatura")
             ax.legend(loc="best")
         else:
             ax.text(0.5, 0.5, "Sin registros válidos del MCP9808", transform=ax.transAxes, ha="center")
     else:
         ax.text(0.5, 0.5, "No se encontró el sensor MCP9808", transform=ax.transAxes, ha="center")
-    ax.set_title("Temperatura del Aire (°C) — Hora Local (El Salvador)")
+    ax.set_title("Temperatura del Aire (°C) — Ciclo Diario (00:00 a 24:00)")
     ax.set_xlabel("Hora local (El Salvador)")
     ax.set_ylabel("Grados (°C)")
     dar_formato_eje_hora(ax, df)
@@ -169,7 +181,7 @@ def grafico_linea(df, columnas, etiquetas, titulo, ylabel):
     fig, ax = plt.subplots(figsize=(12, 4.5))
     for col, lbl in zip(columnas, etiquetas):
         if col in df.columns:
-            ax.plot(df["fecha_hora"], df[col], linewidth=1.3, label=lbl)
+            ax.plot(df["fecha_hora_plot"], df[col], linewidth=1.3, label=lbl)
     ax.set_title(titulo)
     ax.set_xlabel("Hora local")
     ax.set_ylabel(ylabel)
@@ -211,7 +223,7 @@ def grafico_viento(df):
     w = pd.DataFrame({
         "direccion": pd.to_numeric(df["wind_dir"], errors="coerce"),
         "velocidad": pd.to_numeric(df["wind_speed"], errors="coerce"),
-        "fecha": df["fecha_hora"],
+        "fecha": df["fecha_hora_plot"],
     })
     w.loc[~w["direccion"].between(0, 360), "direccion"] = np.nan
     w.loc[~w["velocidad"].between(0, 75), "velocidad"] = np.nan
@@ -446,7 +458,7 @@ c3.metric("Fin", df["fecha_hora"].max().strftime("%d/%m %I:%M %p"))
 duracion = df["fecha_hora"].max() - df["fecha_hora"].min()
 c4.metric("Duración", str(duracion).split(".")[0])
 
-st.write(f"**Periodo en hora local (El Salvador):** {rango_texto(df)}")
+st.write(f"**Periodo capturado (6 AM → 6 AM siguiente):** {rango_texto(df)}")
 
 with st.expander("🔍 Control de Calidad — Completitud de Variables"):
     numeric_cols = [
@@ -560,9 +572,9 @@ with tabs[5]:
 
         with c2:
             fig, ax = plt.subplots(figsize=(10, 4.8))
-            ax.bar(df["fecha_hora"], df["PP_Plot"], width=0.005, color="tab:blue", label="Lluvia Validada")
+            ax.bar(df["fecha_hora_plot"], df["PP_Plot"], width=0.005, color="tab:blue", label="Lluvia Validada")
             if aplicar_qc and total_ficticio > 0:
-                ax.bar(df["fecha_hora"], df["PP_Ficticia"], width=0.005, color="tab:red", label="Lluvia Ficticia (Descartada)")
+                ax.bar(df["fecha_hora_plot"], df["PP_Ficticia"], width=0.005, color="tab:red", label="Lluvia Ficticia (Descartada)")
 
             ax.set_title("Intensidad de Precipitación (mm)")
             ax.set_xlabel("Hora")
