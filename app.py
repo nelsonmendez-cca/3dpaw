@@ -77,11 +77,11 @@ def cargar_dat(file_bytes):
             "Solo deben procesarse archivos recordings_YYYY_MM_DD.dat."
         )
 
-    # Reconstruimos fecha_hora sin restar desfases manuales
+    # Convertimos a formato fecha y ajustamos las 6 horas de desfase UTC a UTC-6 (El Salvador)
     df["fecha_hora"] = pd.to_datetime(
         dict(year=df["year"], month=df["mon"], day=df["day"], hour=df["hour"], minute=df["min"]),
         errors="coerce",
-    )
+    ) - pd.Timedelta(hours=6)
 
     for col in df.columns:
         if pd.api.types.is_numeric_dtype(df[col]):
@@ -130,10 +130,10 @@ def rango_texto(df):
 
 def dar_formato_eje_hora(ax, df):
     """
-    Formatea el eje X para mostrar la escala completa de 00:00 AM a 11:59 PM (24 horas).
+    Formatea el eje X para mostrar la escala completa de 24 horas del día corregido.
     """
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%I:%M %p"))
-    ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))  # Marcas cada 3 horas (12 AM, 3 AM, 6 AM...)
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))  # Marcas cada 3 horas
     
     t_min = df["fecha_hora"].min()
     if pd.notna(t_min):
