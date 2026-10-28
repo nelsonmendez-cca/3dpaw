@@ -340,7 +340,7 @@ def calcular_et_balance_diario(df, latitud, capacidad_suelo, almacenamiento_inic
     return diario.reset_index()
 
 st.title("🌦️ Estación Meteorológica — El Salvador")
-st.caption("Visualización y Control de Calidad Meteorológico (Zona Horaria El Salvador UTC-6)")
+st.caption("Visualización de datos 3dpaw(Zona Horaria El Salvador UTC-6)")
 
 AUTO_REFRESH_SECONDS = 300
 st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="3dpaws_auto_refresh")
