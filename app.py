@@ -77,11 +77,11 @@ def cargar_dat(file_bytes):
             "Solo deben procesarse archivos recordings_YYYY_MM_DD.dat."
         )
 
-    # La estación ya registra en hora local de El Salvador, NO restamos horas
+    # Convertir de hora UTC grabada por 3DPaws a hora local de El Salvador (UTC - 6 horas)
     df["fecha_hora"] = pd.to_datetime(
         dict(year=df["year"], month=df["mon"], day=df["day"], hour=df["hour"], minute=df["min"]),
         errors="coerce",
-    )
+    ) - pd.Timedelta(hours=6)
 
     for col in df.columns:
         if pd.api.types.is_numeric_dtype(df[col]):
@@ -130,16 +130,17 @@ def rango_texto(df):
 
 def dar_formato_eje_hora(ax, df):
     """
-    Formatea el eje X para abarcar el día completo (de 00:00 a 23:59) del archivo seleccionado.
+    Ajusta el eje X dinámicamente según el rango real de las horas registradas.
     """
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%I:%M %p"))
-    ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))  # Marcas cada 3 horas
     
     t_min = df["fecha_hora"].min()
-    if pd.notna(t_min):
-        dia_inicio = t_min.normalize()
-        dia_fin = dia_inicio + pd.Timedelta(hours=23, minutes=59, seconds=59)
-        ax.set_xlim(dia_inicio, dia_fin)
+    t_max = df["fecha_hora"].max()
+    
+    if pd.notna(t_min) and pd.notna(t_max):
+        # Dar un margen razonable alrededor de los datos disponibles
+        padding = pd.Timedelta(minutes=15)
+        ax.set_xlim(t_min - padding, t_max + padding)
         
     ax.grid(True, alpha=.25)
 
@@ -156,7 +157,7 @@ def grafico_temperatura(df):
             ax.text(0.5, 0.5, "Sin registros válidos del MCP9808", transform=ax.transAxes, ha="center")
     else:
         ax.text(0.5, 0.5, "No se encontró el sensor MCP9808", transform=ax.transAxes, ha="center")
-    ax.set_title("Temperatura del Aire (°C)")
+    ax.set_title("Temperatura del Aire (°C) — Hora Local (El Salvador)")
     ax.set_xlabel("Hora local (El Salvador)")
     ax.set_ylabel("Grados (°C)")
     dar_formato_eje_hora(ax, df)
@@ -351,7 +352,7 @@ def calcular_et_balance_diario(df, latitud, capacidad_suelo, almacenamiento_inic
 
     return diario.reset_index()
 
-st.title("🌦️ Estación Meteorológica 3DPaws — El Salvador")
+st.title("🌦️ Estación Meteorológica — El Salvador")
 st.caption("Visualización y Control de Calidad Meteorológico (Zona Horaria El Salvador UTC-6)")
 
 AUTO_REFRESH_SECONDS = 300
@@ -440,8 +441,8 @@ df = cargar_dat(datos_archivo)
 st.subheader("Resumen del registro")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Observaciones", f"{len(df):,}")
-c2.metric("Inicio Local", df["fecha_hora"].min().strftime("%d/%m %I:%M %p"))
-c3.metric("Fin Local", df["fecha_hora"].max().strftime("%d/%m %I:%M %p"))
+c2.metric("Inicio", df["fecha_hora"].min().strftime("%d/%m %I:%M %p"))
+c3.metric("Fin", df["fecha_hora"].max().strftime("%d/%m %I:%M %p"))
 duracion = df["fecha_hora"].max() - df["fecha_hora"].min()
 c4.metric("Duración", str(duracion).split(".")[0])
 
@@ -564,7 +565,7 @@ with tabs[5]:
                 ax.bar(df["fecha_hora"], df["PP_Ficticia"], width=0.005, color="tab:red", label="Lluvia Ficticia (Descartada)")
 
             ax.set_title("Intensidad de Precipitación (mm)")
-            ax.set_xlabel("Hora local")
+            ax.set_xlabel("Hora")
             ax.set_ylabel("Precipitación (mm)")
             ax.legend()
             dar_formato_eje_hora(ax, df)
