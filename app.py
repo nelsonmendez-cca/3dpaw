@@ -127,8 +127,16 @@ def rango_texto(df):
         return "Sin fechas válidas"
     return f"{t.min():%d/%m/%Y %H:%M} → {t.max():%d/%m/%Y %H:%M}"
 
-def dar_formato_eje_hora(ax):
+def dar_formato_eje_hora(ax, df):
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%I:%M %p"))
+    t_min = df["fecha_hora"].min()
+    t_max = df["fecha_hora"].max()
+    if pd.notna(t_min) and pd.notna(t_max):
+        lim_inf = t_min.normalize() + pd.Timedelta(hours=0, minutes=1)
+        lim_sup = t_min.normalize() + pd.Timedelta(hours=23, minutes=59)
+        if (t_max - t_min).days >= 1:
+            lim_sup = t_max
+        ax.set_xlim(lim_inf, lim_sup)
     ax.grid(True, alpha=.25)
 
 def grafico_temperatura(df):
@@ -147,7 +155,7 @@ def grafico_temperatura(df):
     ax.set_title("Temperatura del Aire (°C)")
     ax.set_xlabel("Hora local (El Salvador)")
     ax.set_ylabel("Grados (°C)")
-    dar_formato_eje_hora(ax)
+    dar_formato_eje_hora(ax, df)
     fig.autofmt_xdate()
     fig.tight_layout()
     return fig
@@ -161,7 +169,7 @@ def grafico_linea(df, columnas, etiquetas, titulo, ylabel):
     ax.set_xlabel("Hora local")
     ax.set_ylabel(ylabel)
     ax.legend()
-    dar_formato_eje_hora(ax)
+    dar_formato_eje_hora(ax, df)
     fig.autofmt_xdate()
     fig.tight_layout()
     return fig
@@ -555,7 +563,7 @@ with tabs[5]:
             ax.set_xlabel("Hora")
             ax.set_ylabel("Precipitación (mm)")
             ax.legend()
-            dar_formato_eje_hora(ax)
+            dar_formato_eje_hora(ax, df)
             fig.autofmt_xdate()
             fig.tight_layout()
             st.pyplot(fig)
