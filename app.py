@@ -77,6 +77,9 @@ def cargar_dat(file_bytes):
             "Solo deben procesarse archivos recordings_YYYY_MM_DD.dat."
         )
 
+    # Ajuste de 6 horas adelantadas del registrador + 6 horas de UTC a hora local El Salvador (UTC-6)
+    # Si tus datos están adelantados 6 horas respecto a la hora real de El Salvador, restamos 6 horas.
+    # Si están en UTC+0 (12 horas arriba de UTC-6 con el desfase), cambia 'hours=6' por 'hours=12'.
     df["fecha_hora"] = pd.to_datetime(
         dict(year=df["year"], month=df["mon"], day=df["day"], hour=df["hour"], minute=df["min"]),
         errors="coerce",
@@ -128,15 +131,19 @@ def rango_texto(df):
     return f"{t.min():%d/%m/%Y %H:%M} → {t.max():%d/%m/%Y %H:%M}"
 
 def dar_formato_eje_hora(ax, df):
+    """
+    Fuerza a que el gráfico muestre las 24 horas completas del día (de 00:00 a 23:59).
+    """
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%I:%M %p"))
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))  # Marcas cada 3 horas (12 AM, 3 AM, 6 AM...)
+    
     t_min = df["fecha_hora"].min()
-    t_max = df["fecha_hora"].max()
-    if pd.notna(t_min) and pd.notna(t_max):
-        lim_inf = t_min.normalize() + pd.Timedelta(hours=0, minutes=1)
-        lim_sup = t_min.normalize() + pd.Timedelta(hours=23, minutes=59)
-        if (t_max - t_min).days >= 1:
-            lim_sup = t_max
-        ax.set_xlim(lim_inf, lim_sup)
+    if pd.notna(t_min):
+        # Establece inicio a las 00:00:00 y fin a las 23:59:59 del día correspondiente
+        dia_inicio = t_min.normalize()
+        dia_fin = dia_inicio + pd.Timedelta(hours=23, minutes=59, seconds=59)
+        ax.set_xlim(dia_inicio, dia_fin)
+        
     ax.grid(True, alpha=.25)
 
 def grafico_temperatura(df):
