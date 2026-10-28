@@ -77,11 +77,11 @@ def cargar_dat(file_bytes):
             "Solo deben procesarse archivos recordings_YYYY_MM_DD.dat."
         )
 
-    # Convertir tiempo registrado en UTC a hora local de El Salvador (UTC - 6 horas)
+    # La estación ya registra en hora local de El Salvador, NO restamos horas
     df["fecha_hora"] = pd.to_datetime(
         dict(year=df["year"], month=df["mon"], day=df["day"], hour=df["hour"], minute=df["min"]),
         errors="coerce",
-    ) - pd.Timedelta(hours=6)
+    )
 
     for col in df.columns:
         if pd.api.types.is_numeric_dtype(df[col]):
@@ -130,26 +130,16 @@ def rango_texto(df):
 
 def dar_formato_eje_hora(ax, df):
     """
-    Ajusta dinámicamente el eje horizontal según la extensión del archivo cargado.
-    Si el archivo corresponde a un solo día local, se encuadra de 00:00 a 23:59.
-    Si cruza días o es parcial, se ajusta al inicio y fin real de las mediciones.
+    Formatea el eje X para abarcar el día completo (de 00:00 a 23:59) del archivo seleccionado.
     """
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%I:%M %p"))
-    ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))  # Marcas cada 3 horas
     
     t_min = df["fecha_hora"].min()
-    t_max = df["fecha_hora"].max()
-    
-    if pd.notna(t_min) and pd.notna(t_max):
-        # Si las lecturas cubren la mayor parte del mismo día local
-        if t_min.date() == t_max.date():
-            dia_inicio = t_min.normalize()
-            dia_fin = dia_inicio + pd.Timedelta(hours=23, minutes=59, seconds=59)
-            ax.set_xlim(dia_inicio, dia_fin)
-        else:
-            # Si el archivo abarca más de un día local tras la conversión UTC-6
-            padding = pd.Timedelta(minutes=20)
-            ax.set_xlim(t_min - padding, t_max + padding)
+    if pd.notna(t_min):
+        dia_inicio = t_min.normalize()
+        dia_fin = dia_inicio + pd.Timedelta(hours=23, minutes=59, seconds=59)
+        ax.set_xlim(dia_inicio, dia_fin)
         
     ax.grid(True, alpha=.25)
 
@@ -166,7 +156,7 @@ def grafico_temperatura(df):
             ax.text(0.5, 0.5, "Sin registros válidos del MCP9808", transform=ax.transAxes, ha="center")
     else:
         ax.text(0.5, 0.5, "No se encontró el sensor MCP9808", transform=ax.transAxes, ha="center")
-    ax.set_title("Temperatura del Aire (°C) — Hora Local El Salvador (UTC-6)")
+    ax.set_title("Temperatura del Aire (°C)")
     ax.set_xlabel("Hora local (El Salvador)")
     ax.set_ylabel("Grados (°C)")
     dar_formato_eje_hora(ax, df)
@@ -180,7 +170,7 @@ def grafico_linea(df, columnas, etiquetas, titulo, ylabel):
         if col in df.columns:
             ax.plot(df["fecha_hora"], df[col], linewidth=1.3, label=lbl)
     ax.set_title(titulo)
-    ax.set_xlabel("Hora local (El Salvador)")
+    ax.set_xlabel("Hora local")
     ax.set_ylabel(ylabel)
     ax.legend()
     dar_formato_eje_hora(ax, df)
@@ -455,7 +445,7 @@ c3.metric("Fin Local", df["fecha_hora"].max().strftime("%d/%m %I:%M %p"))
 duracion = df["fecha_hora"].max() - df["fecha_hora"].min()
 c4.metric("Duración", str(duracion).split(".")[0])
 
-st.write(f"**Periodo en hora local (El Salvador - UTC-6):** {rango_texto(df)}")
+st.write(f"**Periodo en hora local (El Salvador):** {rango_texto(df)}")
 
 with st.expander("🔍 Control de Calidad — Completitud de Variables"):
     numeric_cols = [
