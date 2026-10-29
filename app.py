@@ -21,7 +21,11 @@ st.set_page_config(
 
 MISSING = -999.99
 DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1ECyuzx0Ec_6g7eoJvBkvHXWH89kgeLpJ"
-AUTO_REFRESH_SECONDS = 300
+AUTO_REFRESH_SECONDS = 60
+
+# Parámetros geográficos de la estación (El Salvador)
+LATITUD_ESTACION = 13.68   # grados Norte
+ELEVACION_ESTACION = 800   # metros sobre el nivel del mar (aprox.)
 
 # Directorio de caché persistente dentro del proyecto para evitar bloqueos y descargas lentas
 CACHE_DIR = Path("data_cache")
@@ -63,6 +67,188 @@ def evaluar_control_calidad_lluvia(row):
         return True
 
     return False
+
+# ==========================================================
+# EVAPOTRANSPIRACIÓN (ET₀) Y BALANCE HÍDRICO
+# ==========================================================
+
+def calcular_ra(latitud_grados, dia_juliano):
+    """Radiación extraterrestre (Ra) en MJ/m²/día — ecuaciones FAO-56."""
+    lat = math.radians(latitud_grados)
+    dr = 1 + 0.033 * math.cos(2 * math.pi * dia_juliano / 365)
+    delta = 0.409 * math.sin(2 * math.pi * dia_juliano / 365 - 1.39)
+    ws = math.acos(max(-1, min(1, -math.tan(lat) * math.tan(delta))))
+    Gsc = 0.0820  # constante solar, MJ m⁻² min⁻¹
+    Ra = (24 * 60 / math.pi) * Gsc * dr * (
+        ws * math.sin(lat) * math.sin(delta)
+        + math.cos(lat) * math.cos(delta) * math.sin(ws)
+    )
+    return max(Ra, 0)
+
+
+def calcular_horas_sol(latitud_grados, dia_juliano):
+    """Duración máxima de insolación (N) en horas — FAO-56."""
+    lat = math.radians(latitud_grados)
+    delta = 0.409 * math.sin(2 * math.pi * dia_juliano / 365 - 1.39)
+    ws = math.acos(max(-1, min(1, -math.tan(lat) * math.tan(delta))))
+    return 24 / math.pi * ws
+
+
+def calcular_et0_hargreaves(tmin, tmax, tmean, ra):
+    """
+    ET₀ por Hargreaves-Samani (1985) en mm/día.
+    Solo requiere temperatura y radiación extraterrestre.
+    """
+    if any(pd.isna(x) for x in [tmin, tmax, tmean]) or tmax <= tmin:
+        return np.nan
+    Ra_mm = ra / 2.45  # MJ/m²/día → mm/día equivalente de evaporación
+    return max(0, 0.0023 * (tmean + 17.8) * math.sqrt(tmax - tmin) * Ra_mm)
+
+
+def calcular_et0_penman_monteith_fao56(
+    tmean, tmin, tmax, rh_mean, u2_mean, presion_kpa, ra,
+    elevacion=ELEVACION_ESTACION,
+):
+    """
+    ET₀ por FAO Penman-Monteith (FAO-56) en mm/día.
+    Requiere temperatura, humedad relativa, viento, presión y Ra.
+    La radiación solar incidente (Rs) se estima internamente con la
+    fórmula de Hargreaves-Radiation cuando no se dispone de piranómetro.
+    """
+    if any(pd.isna(x) for x in [tmean, tmin, tmax, rh_mean, u2_mean, presion_kpa]):
+        return np.nan
+
+    T = tmean
+    P = presion_kpa
+    gamma = 0.000665 * P  # constante psicrométrica (kPa/°C)
+
+    es_max = 0.6108 * math.exp(17.27 * tmax / (tmax + 237.3))
+    es_min = 0.6108 * math.exp(17.27 * tmin / (tmin + 237.3))
+    es = (es_max + es_min) / 2  # presión de saturación media
+    ea = es * rh_mean / 100       # presión de vapor real
+
+    delta_svp = (
+        4098 * 0.6108 * math.exp(17.27 * T / (T + 237.3))
+        / ((T + 237.3) ** 2)
+    )
+
+    # Radiación solar incidente estimada (Hargreaves radiation)
+    kRs = 0.16  # coeficiente para regiones interiores
+    Rs = kRs * math.sqrt(max(tmax - tmin, 0)) * ra
+
+    Rso = (0.75 + 2e-5 * elevacion) * ra  # radiación en cielo despejado
+    Rns = (1 - 0.23) * Rs                  # radiación neta de onda corta
+
+    sigma = 4.903e-9  # Stefan-Boltzmann (MJ m⁻² día⁻¹ K⁻⁴)
+    Rs_Rso = min(Rs / max(Rso, 0.01), 1.0)
+    Rnl = (
+        sigma
+        * (((tmax + 273.16) ** 4 + (tmin + 273.16) ** 4) / 2)
+        * (0.34 - 0.14 * math.sqrt(max(ea, 0)))
+        * (1.35 * Rs_Rso - 0.35)
+    )
+
+    Rn = Rns - Rnl  # radiación neta
+    G = 0            # flujo de calor del suelo ≈ 0 a escala diaria
+
+    num = (
+        0.408 * delta_svp * (Rn - G)
+        + gamma * (900 / (T + 273)) * u2_mean * (es - ea)
+    )
+    den = delta_svp + gamma * (1 + 0.34 * u2_mean)
+    return max(0, num / den)
+
+
+def calcular_balance_hidrico(
+    df, metodo="hargreaves", latitud=LATITUD_ESTACION, elevacion=ELEVACION_ESTACION, kc=1.0
+):
+    """
+    Calcula ET₀ diaria, ETc (evapotranspiración del cultivo = ET0 * Kc)
+    y genera la serie acumulada de balance hídrico (P - ETc).
+    Retorna un dict con métricas clave y un DataFrame con la serie temporal acumulada.
+    """
+    if df.empty or "fecha_hora" not in df.columns:
+        return None
+
+    fecha = df["fecha_hora"].dt.date.mode()[0]
+    doy = fecha.timetuple().tm_yday
+    ra = calcular_ra(latitud, doy)
+    N = calcular_horas_sol(latitud, doy)
+
+    temp_col = "mcp9808" if "mcp9808" in df.columns else None
+    if temp_col is None:
+        return None
+
+    t_ser = pd.to_numeric(df[temp_col], errors="coerce").dropna()
+    if t_ser.empty:
+        return None
+
+    tmin = float(t_ser.min())
+    tmax = float(t_ser.max())
+    tmean = float(t_ser.mean())
+
+    # —— Hargreaves-Samani ——
+    et0_hg = calcular_et0_hargreaves(tmin, tmax, tmean, ra)
+
+    # —— Penman-Monteith FAO-56 ——
+    et0_pm = np.nan
+    hum_col = "hum_hum" if "hum_hum" in df.columns else None
+    wind_col = "wind_speed" if "wind_speed" in df.columns else None
+    pres_col = "bmp_pres" if "bmp_pres" in df.columns else None
+    if all(c is not None for c in [hum_col, wind_col, pres_col]):
+        rh_mean = float(pd.to_numeric(df[hum_col], errors="coerce").mean())
+        u2_mean = float(pd.to_numeric(df[wind_col], errors="coerce").mean())
+        p_mean_kpa = float(pd.to_numeric(df[pres_col], errors="coerce").mean()) / 10
+        et0_pm = calcular_et0_penman_monteith_fao56(
+            tmean, tmin, tmax, rh_mean, u2_mean, p_mean_kpa, ra, elevacion,
+        )
+
+    et0 = et0_pm if metodo == "penman_monteith" and pd.notna(et0_pm) else et0_hg
+    etc = (et0 * kc) if pd.notna(et0) else np.nan
+
+    # Precipitación acumulada
+    pp_col = "PP_Plot" if "PP_Plot" in df.columns else None
+    precip_total = float(df[pp_col].sum()) if pp_col else 0.0
+
+    balance = (precip_total - etc) if pd.notna(etc) else np.nan
+
+    # ——— Serie acumulada para gráficos ———
+    df_bal = df[["fecha_hora"]].copy()
+    df_bal["PP_acum"] = df[pp_col].cumsum().values if pp_col else 0.0
+
+    # Distribución sinusoidal de ET durante horas de luz
+    sunrise_h = 12 - N / 2
+    sunset_h = 12 + N / 2
+    hora_dec = df_bal["fecha_hora"].dt.hour + df_bal["fecha_hora"].dt.minute / 60.0
+    peso = np.where(
+        (hora_dec >= sunrise_h) & (hora_dec <= sunset_h),
+        np.sin(np.pi * (hora_dec - sunrise_h) / max(N, 0.1)),
+        0.0,
+    )
+    peso_acum = np.cumsum(peso)
+    peso_total = peso_acum[-1] if len(peso_acum) and peso_acum[-1] > 0 else 1.0
+
+    df_bal["ET0_acum"] = (peso_acum / peso_total) * et0 if pd.notna(et0) else 0.0
+    df_bal["ETc_acum"] = (peso_acum / peso_total) * etc if pd.notna(etc) else 0.0
+    df_bal["Balance_acum"] = df_bal["PP_acum"] - df_bal["ETc_acum"]
+
+    return {
+        "et0_hargreaves": et0_hg,
+        "et0_penman_monteith": et0_pm,
+        "et0_usado": et0,
+        "kc": kc,
+        "etc_usado": etc,
+        "metodo": metodo,
+        "precipitacion": precip_total,
+        "balance": balance,
+        "ra": ra,
+        "N": N,
+        "tmin": tmin,
+        "tmax": tmax,
+        "tmean": tmean,
+        "doy": doy,
+        "df_balance": df_bal,
+    }
 
 # ==========================================================
 # PROCESAMIENTO RAW Y RECONSTRUCCIÓN TEMPORAL
@@ -110,16 +296,16 @@ def procesar_df_raw(file_bytes):
 # GESTIÓN Y CACHÉ DE ARCHIVOS DE GOOGLE DRIVE
 # ==========================================================
 
-@st.cache_data(ttl=240, show_spinner=False)
+@st.cache_data(ttl=50, show_spinner=False)
 def listar_archivos_drive(forzar_refresco=False):
     """
     Lista los archivos recordings_YYYY_MM_DD.dat desde Google Drive (solo lectura).
     Utiliza caché local en disco para arranque instantáneo (0 ms).
-    Se refresca automáticamente cada 4 minutos para detectar nuevos archivos (ej. corte de 6 PM).
+    Se refresca automáticamente cada ~50 segundos para detectar nuevos archivos.
     """
     if INDEX_FILE.exists() and not forzar_refresco:
         edad = time.time() - INDEX_FILE.stat().st_mtime
-        if edad < 240:
+        if edad < 50:
             try:
                 with open(INDEX_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -170,7 +356,7 @@ def obtener_bytes_archivo(file_info, forzar_recarga=False):
     """
     Obtiene los bytes de un archivo .dat mediante descarga de SOLO LECTURA desde Drive.
     - Los archivos de días pasados cerrados (> 2 días) se leen directamente del disco (0 ms).
-    - Los archivos recientes (de hoy y ayer en UTC) se refrescan si tienen más de 4 minutos.
+    - Los archivos recientes (de hoy y ayer en UTC) se refrescan si tienen más de 50 s.
     - Los datos en Google Drive NUNCA se alteran ni modifican.
     """
     nombre = file_info["nombre"]
@@ -186,10 +372,10 @@ def obtener_bytes_archivo(file_info, forzar_recarga=False):
     if destino.exists() and destino.stat().st_size > 0 and not es_archivo_reciente and not forzar_recarga:
         return destino.read_bytes()
 
-    # 2. Si es archivo reciente, reutilizar si fue descargado hace menos de 4 minutos (240s)
+    # 2. Si es archivo reciente, reutilizar si fue descargado hace menos de 50 s
     if destino.exists() and es_archivo_reciente and not forzar_recarga:
         edad = time.time() - destino.stat().st_mtime
-        if edad < 240:
+        if edad < 50:
             return destino.read_bytes()
 
     # 3. Descargar actualización (solo lectura) desde Drive
@@ -211,7 +397,7 @@ def obtener_bytes_archivo(file_info, forzar_recarga=False):
 # RECONSTRUCCIÓN DEL DÍA LOCAL COMPLETO (SOLUCIÓN CORTE 6 PM)
 # ==========================================================
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=50)
 def cargar_datos_dia_local(fecha_str, archivos_dict, forzar_recarga=False):
     """
     Reconstruye las 24 horas del día seleccionado en El Salvador (UTC-6).
@@ -463,7 +649,7 @@ st.caption("Visualización y Control de Calidad Meteorológico (Zona Horaria El 
 with st.sidebar:
     st.header("⚙️ Configuración y Estado")
     st.info("🕒 **Zona horaria:** El Salvador (GMT-6)")
-    st.write(f"🔄 **Auto-refresco:** cada {AUTO_REFRESH_SECONDS // 60} minutos")
+    st.write(f"🔄 **Auto-refresco:** cada {AUTO_REFRESH_SECONDS} segundos (1 min)")
     
     forzar_refresco = st.button("🔄 Actualizar lista de Google Drive")
     if forzar_refresco:
@@ -584,6 +770,7 @@ tabs = st.tabs([
     "Radiación / Luz",
     "Viento",
     "Precipitación / QC",
+    "Balance Hídrico / ET₀",
     "Datos Raw",
 ])
 
@@ -686,6 +873,266 @@ with tabs[5]:
         st.warning("No se encontró la variable 'tipping' en el archivo.")
 
 with tabs[6]:
+    st.markdown("### 💧 Balance Hídrico y Evapotranspiración (ET₀ / ETc)")
+
+    # Detección inteligente de elevación a partir de los datos del sensor barométrico/altimétrico
+    elev_default = ELEVACION_ESTACION
+    if "bmp_alt" in df.columns:
+        alt_val = pd.to_numeric(df["bmp_alt"], errors="coerce").dropna()
+        if not alt_val.empty and alt_val.median() > 0:
+            elev_default = int(round(alt_val.median()))
+
+    col_cfg1, col_cfg2, col_cfg3, col_cfg4 = st.columns(4)
+    with col_cfg1:
+        metodo_et = st.selectbox(
+            "Método de cálculo de ET₀",
+            ["FAO Penman-Monteith", "Hargreaves-Samani"],
+            help="FAO Penman-Monteith (estándar FAO-56) integra radiación estimada, temperatura, humedad, viento y presión. Hargreaves usa temperatura y radiación extraterrestre.",
+        )
+    with col_cfg2:
+        opciones_cultivo = {
+            "🌱 Referencia / Pasto (Kc = 1.00)": 1.00,
+            "☕ Café en producción (Kc = 1.05)": 1.05,
+            "🌽 Maíz grano (Kc = 1.15)": 1.15,
+            "🌾 Frijol (Kc = 1.10)": 1.10,
+            "🎋 Caña de azúcar (Kc = 1.25)": 1.25,
+            "🍅 Tomate / Hortalizas (Kc = 1.05)": 1.05,
+            "🍌 Plátano / Banano (Kc = 1.10)": 1.10,
+            "✏️ Coeficiente Personalizado": None,
+        }
+        cultivo_sel = st.selectbox(
+            "Cultivo / Coeficiente Kc",
+            options=list(opciones_cultivo.keys()),
+            help="El coeficiente Kc ajusta la evapotranspiración de referencia (ET₀) a las necesidades específicas del cultivo: ETc = ET₀ × Kc.",
+        )
+        if opciones_cultivo[cultivo_sel] is not None:
+            kc_valor = opciones_cultivo[cultivo_sel]
+        else:
+            kc_valor = st.slider("Kc personalizado", min_value=0.20, max_value=1.60, value=1.00, step=0.05)
+
+    with col_cfg3:
+        lat_input = st.number_input(
+            "Latitud (°N)", value=LATITUD_ESTACION, format="%.2f",
+            help="Latitud geográfica de la estación.",
+        )
+    with col_cfg4:
+        elev_input = st.number_input(
+            "Elevación (m s.n.m.)", value=elev_default, step=10,
+            help=f"Elevación sobre el nivel del mar. Detectado por barómetro: ~{elev_default} m.",
+        )
+
+    metodo_key = "penman_monteith" if "Penman" in metodo_et else "hargreaves"
+    resultado_bh = calcular_balance_hidrico(
+        df, metodo=metodo_key, latitud=lat_input, elevacion=elev_input, kc=kc_valor
+    )
+
+    if resultado_bh and pd.notna(resultado_bh["et0_usado"]):
+        et0_val = resultado_bh["et0_usado"]
+        etc_val = resultado_bh["etc_usado"]
+        precip_val = resultado_bh["precipitacion"]
+        bal_val = resultado_bh["balance"]
+
+        # ── Métricas principales ──
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("ET₀ (Referencia)", f"{et0_val:.2f} mm/día")
+        m2.metric(f"ETc (Kc={kc_valor:.2f})", f"{etc_val:.2f} mm/día")
+        m3.metric("Precipitación Validada", f"{precip_val:.2f} mm")
+
+        if pd.notna(bal_val):
+            m4.metric(
+                "Balance Hídrico (P − ETc)",
+                f"{bal_val:+.2f} mm",
+                delta="Superávit" if bal_val >= 0 else "Déficit",
+                delta_color="normal" if bal_val >= 0 else "inverse",
+            )
+        else:
+            m4.metric("Balance Hídrico", "N/A")
+
+        riego_necesario_mm = max(0.0, -bal_val) if pd.notna(bal_val) else 0.0
+        m5.metric("Lámina de Riego Neta", f"{riego_necesario_mm:.2f} mm")
+
+        # ── Diagnóstico Agronómico ──
+        if bal_val >= 0:
+            st.success(
+                f"💧 **Superávit hídrico:** +{bal_val:.2f} mm (+{bal_val * 10:.1f} m³/ha). "
+                "Las precipitaciones cubrieron completamente la demanda hídrica diaria del cultivo. "
+                "No se requiere riego el día de hoy."
+            )
+        else:
+            vol_riego_m3 = abs(bal_val) * 10  # 1 mm = 10 m3/ha
+            st.warning(
+                f"☀️ **Déficit hídrico:** {bal_val:.2f} mm. "
+                f"La demanda atmosférica y del cultivo superó a la precipitación. "
+                f"**Riego neto recomendado:** {abs(bal_val):.2f} mm ({vol_riego_m3:.1f} m³/ha) para reponer la humedad del suelo."
+            )
+
+        # Comparar ambos métodos
+        if pd.notna(resultado_bh["et0_penman_monteith"]):
+            st.caption(
+                f"📊 **Hargreaves-Samani:** {resultado_bh['et0_hargreaves']:.2f} mm/día  |  "
+                f"**Penman-Monteith FAO-56:** {resultado_bh['et0_penman_monteith']:.2f} mm/día  |  "
+                f"**Radiación extraterrestre (Ra):** {resultado_bh['ra']:.1f} MJ/m²/día  |  "
+                f"**Insolación astronómica (N):** {resultado_bh['N']:.1f} horas"
+            )
+
+        df_bal = resultado_bh["df_balance"]
+
+        # ── Gráfico 1: Precipitación acumulada vs ETc acumulada ──
+        fig_bh, ax_bh = plt.subplots(figsize=(12, 4.8))
+        ax_bh.plot(
+            df_bal["fecha_hora"], df_bal["PP_acum"],
+            linewidth=2.2, color="tab:blue", label="Precipitación acumulada (P) [mm]",
+        )
+        ax_bh.plot(
+            df_bal["fecha_hora"], df_bal["ETc_acum"],
+            linewidth=2.2, color="tab:orange", linestyle="--",
+            label=f"ETc acumulada ({cultivo_sel.split('(')[0].strip()}) [mm]",
+        )
+        if kc_valor != 1.0:
+            ax_bh.plot(
+                df_bal["fecha_hora"], df_bal["ET0_acum"],
+                linewidth=1.2, color="gray", linestyle=":",
+                label=f"ET₀ de referencia [mm]",
+            )
+        ax_bh.fill_between(
+            df_bal["fecha_hora"], df_bal["PP_acum"], df_bal["ETc_acum"],
+            where=df_bal["PP_acum"] >= df_bal["ETc_acum"],
+            alpha=0.25, color="tab:blue", label="Superávit hídrico (P ≥ ETc)",
+        )
+        ax_bh.fill_between(
+            df_bal["fecha_hora"], df_bal["PP_acum"], df_bal["ETc_acum"],
+            where=df_bal["PP_acum"] < df_bal["ETc_acum"],
+            alpha=0.25, color="tab:red", label="Déficit hídrico (P < ETc)",
+        )
+        ax_bh.set_title(f"Dinámica del Balance Hídrico Acumulado — Precipitación vs ETc ({metodo_et})")
+        ax_bh.set_xlabel("Hora local (El Salvador)")
+        ax_bh.set_ylabel("Lámina de agua (mm)")
+        ax_bh.legend(loc="upper left", fontsize=9)
+        ax_bh.axhline(y=0, color="black", linewidth=0.5)
+        dar_formato_eje_hora(ax_bh, df_bal, fecha_iso)
+        fig_bh.autofmt_xdate()
+        fig_bh.tight_layout()
+        st.pyplot(fig_bh)
+
+        # ── Gráficos secundarios en 2 columnas ──
+        col_g1, col_g2 = st.columns([1.6, 1])
+
+        with col_g1:
+            fig_bn, ax_bn = plt.subplots(figsize=(8, 4))
+            ax_bn.fill_between(
+                df_bal["fecha_hora"], 0, df_bal["Balance_acum"],
+                where=df_bal["Balance_acum"] >= 0, alpha=0.35,
+                color="tab:blue", label="Superávit",
+            )
+            ax_bn.fill_between(
+                df_bal["fecha_hora"], 0, df_bal["Balance_acum"],
+                where=df_bal["Balance_acum"] < 0, alpha=0.35,
+                color="tab:red", label="Déficit",
+            )
+            ax_bn.plot(
+                df_bal["fecha_hora"], df_bal["Balance_acum"],
+                color="navy", linewidth=1.5, label="Balance neto acumulado",
+            )
+            ax_bn.axhline(y=0, color="gray", linewidth=1, linestyle="--")
+            ax_bn.set_title("Evolución Horaria del Balance Neto Acumulado (P − ETc)")
+            ax_bn.set_xlabel("Hora local")
+            ax_bn.set_ylabel("Balance (mm)")
+            ax_bn.legend(loc="best", fontsize=8)
+            dar_formato_eje_hora(ax_bn, df_bal, fecha_iso)
+            fig_bn.autofmt_xdate()
+            fig_bn.tight_layout()
+            st.pyplot(fig_bn)
+
+        with col_g2:
+            fig_bar, ax_bar = plt.subplots(figsize=(5, 4))
+            cat = ["P Validada", "ET₀", "ETc", "Balance"]
+            vals = [precip_val, et0_val, etc_val, bal_val]
+            cols = [
+                "tab:blue",
+                "gray",
+                "tab:orange",
+                "tab:green" if bal_val >= 0 else "tab:red",
+            ]
+            bars = ax_bar.bar(cat, vals, color=cols, width=0.55, edgecolor="black", linewidth=0.8)
+            for bar, val in zip(bars, vals):
+                y_pos = bar.get_height() + 0.05 if val >= 0 else bar.get_height() - 0.25
+                ax_bar.text(
+                    bar.get_x() + bar.get_width() / 2, y_pos,
+                    f"{val:+.2f}" if bar == bars[-1] else f"{val:.2f}",
+                    ha="center", va="bottom" if val >= 0 else "top",
+                    fontweight="bold", fontsize=9,
+                )
+            ax_bar.axhline(y=0, color="black", linewidth=0.8)
+            ax_bar.set_ylabel("Lámina (mm / día)")
+            ax_bar.set_title("Balance Diario Consolidado")
+            val_max = max(max(vals), 0.5)
+            val_min = min(min(vals), 0.0)
+            ax_bar.set_ylim(val_min * 1.3 - 0.2, val_max * 1.3 + 0.2)
+            fig_bar.tight_layout()
+            st.pyplot(fig_bar)
+
+        # ── Exportación de la serie de Balance Hídrico ──
+        csv_bh = df_bal.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Descargar serie temporal de Balance Hídrico (CSV)",
+            data=csv_bh,
+            file_name=f"3DPaws_Balance_Hidrico_{fecha_iso}.csv",
+            mime="text/csv",
+        )
+
+        # ── Información metodológica y científica ──
+        with st.expander("📖 Fundamentos Científicos y Metodología (FAO-56)"):
+            st.markdown(f"""
+**Condiciones del día ({fecha_iso}):**
+
+| Variable | Valor |
+|---|---|
+| Día del año (Día Juliano) | {resultado_bh['doy']} |
+| Radiación extraterrestre ($R_a$) | {resultado_bh['ra']:.2f} MJ/m²/día |
+| Insolación astronómica máxima ($N$) | {resultado_bh['N']:.1f} horas |
+| Temperatura mínima ($T_{{min}}$) | {resultado_bh['tmin']:.1f} °C |
+| Temperatura máxima ($T_{{max}}$) | {resultado_bh['tmax']:.1f} °C |
+| Temperatura media ($T_{{mean}}$) | {resultado_bh['tmean']:.1f} °C |
+| Latitud geográfica | {lat_input:.2f}°N |
+| Elevación sobre el nivel del mar | {elev_input} m |
+| Coeficiente del cultivo ($K_c$) | {kc_valor:.2f} ({cultivo_sel}) |
+
+---
+
+### 1. Método Estándar FAO-56 Penman-Monteith
+Recomendado mundialmente por la FAO y la OMM como el método físico de mayor exactitud:
+
+$$ET_0 = \\frac{{0.408 \\, \\Delta \\, (R_n - G) + \\gamma \\, \\frac{{900}}{{T+273}} \\, u_2 \\, (e_s - e_a)}}{{\\Delta + \\gamma \\, (1 + 0.34 \\, u_2)}}$$
+
+Donde:
+- $R_n$: Radiación neta en la superficie del cultivo ($MJ \\cdot m^{{-2}} \\cdot d^{{-1}}$).
+- $G$: Flujo de calor en el suelo (≈ 0 a escala diaria).
+- $T$: Temperatura media del aire a 2 m (°C).
+- $u_2$: Velocidad del viento a 2 m de altura ($m/s$).
+- $e_s - e_a$: Déficit de presión de vapor de saturación ($kPa$).
+- $\\Delta$: Pendiente de la curva de presión de saturación de vapor ($kPa/°C$).
+- $\\gamma$: Constante psicrométrica ($kPa/°C$).
+
+### 2. Método Hargreaves-Samani (1985)
+Método empírico alternativo de alta confiabilidad cuando no se dispone de viento o humedad completos:
+
+$$ET_0 = 0.0023 \\times (T_{{mean}} + 17.8) \\times (T_{{max}} - T_{{min}})^{{0.5}} \\times R_a$$
+
+### 3. Evapotranspiración del Cultivo ($ET_c$) y Balance Hídrico
+$$ET_c = K_c \\times ET_0$$
+
+$$Balance = P - ET_c$$
+
+- **$Balance > 0$ (Superávit):** Hay exceso de humedad en el suelo; posible percolación o escorrentía superficial.
+- **$Balance < 0$ (Déficit):** El cultivo consume más agua de la aportada por la lluvia. Requiere riego de reposición equivalente a $|Balance| \\times 10 \\text{ m}^3/\\text{ha}$.
+            """)
+    else:
+        st.warning(
+            "No hay datos suficientes de temperatura para calcular la evapotranspiración. "
+            "Se requiere al menos la columna `mcp9808` con valores válidos."
+        )
+
+with tabs[7]:
     mostrar = st.multiselect("Variables a mostrar", options=list(df.columns), default=list(df.columns)[:10])
     st.dataframe(df[mostrar], width="stretch", height=450)
 
