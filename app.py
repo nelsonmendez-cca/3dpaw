@@ -1098,34 +1098,35 @@ with tabs[6]:
 | Coeficiente del cultivo ($K_c$) | {kc_valor:.2f} ({cultivo_sel}) |
 
 ---
-
+""")
+            st.markdown(r"""
 ### 1. Método Estándar FAO-56 Penman-Monteith
 Recomendado mundialmente por la FAO y la OMM como el método físico de mayor exactitud:
 
-$$ET_0 = \\frac{{0.408 \\, \\Delta \\, (R_n - G) + \\gamma \\, \\frac{{900}}{{T+273}} \\, u_2 \\, (e_s - e_a)}}{{\\Delta + \\gamma \\, (1 + 0.34 \\, u_2)}}$$
+$$ET_0 = \frac{0.408 \, \Delta \, (R_n - G) + \gamma \, \frac{900}{T+273} \, u_2 \, (e_s - e_a)}{\Delta + \gamma \, (1 + 0.34 \, u_2)}$$
 
 Donde:
-- $R_n$: Radiación neta en la superficie del cultivo ($MJ \\cdot m^{{-2}} \\cdot d^{{-1}}$).
+- $R_n$: Radiación neta en la superficie del cultivo ($MJ \cdot m^{-2} \cdot d^{-1}$).
 - $G$: Flujo de calor en el suelo (≈ 0 a escala diaria).
 - $T$: Temperatura media del aire a 2 m (°C).
 - $u_2$: Velocidad del viento a 2 m de altura ($m/s$).
 - $e_s - e_a$: Déficit de presión de vapor de saturación ($kPa$).
-- $\\Delta$: Pendiente de la curva de presión de saturación de vapor ($kPa/°C$).
-- $\\gamma$: Constante psicrométrica ($kPa/°C$).
+- $\Delta$: Pendiente de la curva de presión de saturación de vapor ($kPa/°C$).
+- $\gamma$: Constante psicrométrica ($kPa/°C$).
 
 ### 2. Método Hargreaves-Samani (1985)
 Método empírico alternativo de alta confiabilidad cuando no se dispone de viento o humedad completos:
 
-$$ET_0 = 0.0023 \\times (T_{{mean}} + 17.8) \\times (T_{{max}} - T_{{min}})^{{0.5}} \\times R_a$$
+$$ET_0 = 0.0023 \times (T_{mean} + 17.8) \times (T_{max} - T_{min})^{0.5} \times R_a$$
 
 ### 3. Evapotranspiración del Cultivo ($ET_c$) y Balance Hídrico
-$$ET_c = K_c \\times ET_0$$
+$$ET_c = K_c \times ET_0$$
 
 $$Balance = P - ET_c$$
 
 - **$Balance > 0$ (Superávit):** Hay exceso de humedad en el suelo; posible percolación o escorrentía superficial.
-- **$Balance < 0$ (Déficit):** El cultivo consume más agua de la aportada por la lluvia. Requiere riego de reposición equivalente a $|Balance| \\times 10 \\text{ m}^3/\\text{ha}$.
-            """)
+- **$Balance < 0$ (Déficit):** El cultivo consume más agua de la aportada por la lluvia. Requiere riego de reposición equivalente a $|Balance| \times 10 \text{ m}^3/\text{ha}$.
+""")
     else:
         st.warning(
             "No hay datos suficientes de temperatura para calcular la evapotranspiración. "
