@@ -5,12 +5,12 @@ import time
 import re
 from pathlib import Path
 import tempfile
+import requests
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 import gdown
 
 st.set_page_config(
@@ -21,7 +21,7 @@ st.set_page_config(
 
 MISSING = -999.99
 DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1ECyuzx0Ec_6g7eoJvBkvHXWH89kgeLpJ"
-AUTO_REFRESH_SECONDS = 60
+CHECK_INTERVAL_SECONDS = 60
 
 # Parámetros geográficos de la estación (El Salvador)
 LATITUD_ESTACION = 13.68   # grados Norte
@@ -31,8 +31,6 @@ ELEVACION_ESTACION = 800   # metros sobre el nivel del mar (aprox.)
 CACHE_DIR = Path("data_cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 INDEX_FILE = CACHE_DIR / "drive_index.json"
-
-st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="3dpaws_auto_refresh")
 
 # ==========================================================
 # CÁLCULOS METEOROLÓGICOS Y CONTROL DE CALIDAD (QC)
@@ -352,6 +350,74 @@ def listar_archivos_drive(forzar_refresco=False):
             return json.load(f)
     return []
 
+def obtener_metadatos_drive(file_id):
+    """
+    Realiza una petición HTTP HEAD ultraliviana (~1 KB) a Google Drive
+    para obtener Content-Length y Last-Modified sin descargar el cuerpo.
+    """
+    if not file_id:
+        return None, None
+    url = f"https://drive.google.com/uc?id={file_id}&export=download"
+    try:
+        r = requests.head(url, allow_redirects=True, timeout=8)
+        if r.status_code == 200:
+            return r.headers.get("Content-Length"), r.headers.get("Last-Modified")
+    except Exception:
+        pass
+    return None, None
+
+@st.fragment(run_every=CHECK_INTERVAL_SECONDS)
+def monitor_drive_inteligente(archivo_info, es_dia_activo=True):
+    """
+    Fragmento aislado que se ejecuta cada 60 segundos en segundo plano.
+    Verifica mediante HTTP HEAD si el archivo de la estación en Google Drive
+    ha cambiado de tamaño o fecha de modificación.
+    - Si no cambió: la interfaz NO parpadea ni recarga nada (0% CPU / gráficos).
+    - Si cambió: limpia la caché y recarga la app completa (st.rerun()).
+    """
+    if not archivo_info or not archivo_info.get("id"):
+        st.caption("ℹ️ Sin archivo activo para monitoreo.")
+        return
+
+    fid = archivo_info["id"]
+    nombre = archivo_info.get("nombre", "archivo.dat")
+
+    ahora_local = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=6)
+    hora_str = ahora_local.strftime("%I:%M:%S %p")
+
+    sig_key = f"sig_{fid}"
+    last_size, last_mod = st.session_state.get(sig_key, (None, None))
+
+    curr_size, curr_mod = obtener_metadatos_drive(fid)
+
+    with st.container():
+        if curr_size is not None or curr_mod is not None:
+            if last_size is None and last_mod is None:
+                # Inicialización en la primera carga
+                st.session_state[sig_key] = (curr_size, curr_mod)
+                st.caption(f"🟢 **Sincronizado:** `{nombre}` ({hora_str}) — Sin cambios.")
+            elif (curr_size != last_size) or (curr_mod != last_mod):
+                # ¡Cambio detectado en Google Drive!
+                st.session_state[sig_key] = (curr_size, curr_mod)
+                # Borrar el archivo local en caché para obligar a gdown a bajar el nuevo
+                destino = CACHE_DIR / nombre
+                if destino.exists():
+                    try:
+                        destino.unlink()
+                    except Exception:
+                        pass
+                st.cache_data.clear()
+                if es_dia_activo:
+                    st.info(f"🔄 **Nuevos datos en Drive:** {curr_size} bytes ({hora_str}). Actualizando...")
+                    st.rerun()
+                else:
+                    st.toast(f"Nuevos datos detectados en Drive para {nombre}", icon="🌦️")
+            else:
+                # No hay cambios: no hacer rerun
+                st.caption(f"🟢 **Drive al día:** `{nombre}` sin cambios ({hora_str}).")
+        else:
+            st.caption(f"🟡 **Drive:** Verificando cabeceras ({hora_str})...")
+
 def obtener_bytes_archivo(file_info, forzar_recarga=False):
     """
     Obtiene los bytes de un archivo .dat mediante descarga de SOLO LECTURA desde Drive.
@@ -649,7 +715,6 @@ st.caption("Visualización y Control de Calidad Meteorológico (Zona Horaria El 
 with st.sidebar:
     st.header("⚙️ Configuración y Estado")
     st.info("🕒 **Zona horaria:** El Salvador (GMT-6)")
-    st.write(f"🔄 **Auto-refresco:** cada {AUTO_REFRESH_SECONDS} segundos (1 min)")
     
     forzar_refresco = st.button("🔄 Actualizar lista de Google Drive")
     if forzar_refresco:
@@ -716,8 +781,20 @@ tiene_bloque_noche = file_next_name in archivos_dict
 
 if tiene_bloque_noche:
     st.caption(f"🔗 **Reconstrucción 24h unificada:** 00:00–17:59 (`{file_curr_name}`) + 18:00–23:59 (`{file_next_name}`).")
+    archivo_monitoreado = archivos_dict.get(file_next_name)
 else:
     st.caption(f"🔗 **Día en curso:** 00:00–17:59 (`{file_curr_name}`). El bloque nocturno 18:00+ se unificará automáticamente al iniciar `{file_next_name}`.")
+    archivo_monitoreado = archivos_dict.get(file_curr_name)
+
+if not archivo_monitoreado and archivos_drive:
+    archivos_ordenados = sorted(archivos_drive, key=lambda x: x["fecha"], reverse=True)
+    archivo_monitoreado = archivos_ordenados[0]
+
+with st.sidebar:
+    st.markdown("---")
+    st.markdown("**📡 Sincronización Inteligente**")
+    st.caption("Verifica cada 60 s en Drive (HEAD) si el archivo cambió. Solo recarga si hay datos nuevos.")
+    monitor_drive_inteligente(archivo_monitoreado, es_dia_activo=(target_date == hoy_local))
 
 with st.spinner("Cargando y procesando datos meteorológicos..."):
     df = cargar_datos_dia_local(fecha_iso, archivos_dict)
