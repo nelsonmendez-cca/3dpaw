@@ -14,7 +14,7 @@ import streamlit as st
 import gdown
 
 st.set_page_config(
-    page_title="3DPaws | Estación meteorológica El Salvador",
+    page_title="3DPaws | Estación 3D Paws",
     page_icon="🌦️",
     layout="wide",
 )
@@ -749,7 +749,7 @@ def grafico_viento(df):
 # INTERFAZ PRINCIPAL
 # ==========================================================
 
-st.title("🌦️ 3D Paws — El Salvador")
+st.title("🌦️ Estación 3D Paws — DOA MARN")
 st.caption("Visualización y Control de Calidad Meteorológico (Zona Horaria El Salvador GMT-6 / UTC-6)")
 
 # Barra lateral para control de sincronización
