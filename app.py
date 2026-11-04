@@ -311,24 +311,35 @@ def es_archivo_activo(nombre_archivo):
         activo_esperado = f"recordings_{manana.strftime('%Y_%m_%d')}.dat"
     return nombre_archivo == activo_esperado
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def listar_archivos_drive(forzar_refresco=False):
     """
     Lista los archivos recordings_YYYY_MM_DD.dat desde Google Drive (solo lectura).
-    Utiliza caché local en disco para arranque instantáneo (0 ms).
-    Caché de 10 minutos para evitar escaneos pesados y no ser bloqueado por Google Drive.
+    Utiliza caché local en disco para arranque rápido (0 ms).
+    Solo confía en el archivo en disco si contiene registros recientes (hoy o ayer).
+    Si el índice local no tiene datos recientes o expiró (> 5 min), consulta Google Drive.
     """
-    if INDEX_FILE.exists() and not forzar_refresco:
-        edad = time.time() - INDEX_FILE.stat().st_mtime
-        if edad < 600:
-            try:
-                with open(INDEX_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if data:
-                    return data
-            except Exception:
-                pass
+    ahora_local_ref = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=6)
+    hoy_ref = ahora_local_ref.date()
+    ayer_ref = hoy_ref - pd.Timedelta(days=1)
 
+    # 1. Verificar si el archivo en disco es fresco y contiene fechas recientes
+    if INDEX_FILE.exists() and not forzar_refresco:
+        try:
+            with open(INDEX_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data:
+                fechas = [pd.to_datetime(x["fecha"]).date() for x in data if "fecha" in x]
+                max_fecha = max(fechas) if fechas else None
+                edad = time.time() - INDEX_FILE.stat().st_mtime
+                # Solo aceptar el caché en disco si contiene al menos la fecha de ayer o de hoy
+                # y fue guardado hace menos de 5 minutos (300 s)
+                if max_fecha and max_fecha >= ayer_ref and edad < 300:
+                    return data
+        except Exception:
+            pass
+
+    # 2. Consultar Google Drive para obtener el catálogo completo actualizado
     patron = re.compile(r"^recordings_(20\d{2})_(\d{2})_(\d{2})\.dat$", re.IGNORECASE)
     try:
         archivos = gdown.download_folder(
@@ -350,9 +361,22 @@ def listar_archivos_drive(forzar_refresco=False):
                 "fecha": f"{m.group(1)}-{m.group(2)}-{m.group(3)}",
             })
         if encontrados:
+            # Combinar con los existentes para asegurar que nunca se pierdan IDs históricos
+            combinados_dict = {}
+            if INDEX_FILE.exists():
+                try:
+                    with open(INDEX_FILE, "r", encoding="utf-8") as f:
+                        for prev in json.load(f):
+                            combinados_dict[prev["nombre"]] = prev
+                except Exception:
+                    pass
+            for nuevo in encontrados:
+                combinados_dict[nuevo["nombre"]] = nuevo
+
+            lista_final = sorted(list(combinados_dict.values()), key=lambda x: x["fecha"])
             with open(INDEX_FILE, "w", encoding="utf-8") as f:
-                json.dump(encontrados, f, indent=2)
-            return encontrados
+                json.dump(lista_final, f, indent=2)
+            return lista_final
     except Exception as e:
         if INDEX_FILE.exists():
             try:

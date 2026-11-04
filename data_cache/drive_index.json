@@ -5,6 +5,11 @@
     "fecha": "2019-02-14"
   },
   {
+    "nombre": "recordings_2026_01_03.dat",
+    "id": "1Llp9tMsMvx-Qz0M_Imnmi57_SerJZMJv",
+    "fecha": "2026-01-03"
+  },
+  {
     "nombre": "recordings_2026_08_06.dat",
     "id": "1wN2OaGBh4kjhENNj6T_kN7JAcJEy4dAu",
     "fecha": "2026-08-06"
@@ -143,5 +148,35 @@
     "nombre": "recordings_2026_10_29.dat",
     "id": "1HvYjxtTro266GdDtzF4SD610fP1Y2TR-",
     "fecha": "2026-10-29"
+  },
+  {
+    "nombre": "recordings_2026_10_30.dat",
+    "id": "1_bjKpyH83foqkom6n-2GKUWXvyM-9TbE",
+    "fecha": "2026-10-30"
+  },
+  {
+    "nombre": "recordings_2026_10_31.dat",
+    "id": "1MWSGFmOBjz_z1IzB5qt8GOOzeaNILabY",
+    "fecha": "2026-10-31"
+  },
+  {
+    "nombre": "recordings_2026_11_01.dat",
+    "id": "17CwVIaZEwEvX6X0njeAVM6IniUOexY5P",
+    "fecha": "2026-11-01"
+  },
+  {
+    "nombre": "recordings_2026_11_02.dat",
+    "id": "1SZ75l6O2_e_8DkOu51BN-q_DivBM1VC1",
+    "fecha": "2026-11-02"
+  },
+  {
+    "nombre": "recordings_2026_11_03.dat",
+    "id": "1E4ViNPUvNp3YaK60vD_hdVvVSJPEyLGQ",
+    "fecha": "2026-11-03"
+  },
+  {
+    "nombre": "recordings_2026_11_04.dat",
+    "id": "1bssv_kxFt3696JT9CINWcdJj8YlBUP6F",
+    "fecha": "2026-11-04"
   }
 ]
