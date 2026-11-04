@@ -294,16 +294,33 @@ def procesar_df_raw(file_bytes):
 # GESTIÓN Y CACHÉ DE ARCHIVOS DE GOOGLE DRIVE
 # ==========================================================
 
-@st.cache_data(ttl=50, show_spinner=False)
+def es_archivo_activo(nombre_archivo):
+    """
+    Determina si un archivo .dat está actualmente en curso (recibiendo escrituras cada 5 min de la estación).
+    - En El Salvador (GMT-6), las 24 horas del día se dividen en:
+      * 00:00 a 17:59 local (06:00 a 23:59 UTC): activo es recordings_HOY.dat
+      * 18:00 a 23:59 local (00:00 a 05:59 UTC): activo es recordings_(HOY+1).dat
+    Cualquier otro archivo del pasado o bloque cerrado es ESTÁTICO (nunca cambia en Drive).
+    """
+    ahora = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=6)
+    hoy = ahora.date()
+    if ahora.hour < 18:
+        activo_esperado = f"recordings_{hoy.strftime('%Y_%m_%d')}.dat"
+    else:
+        manana = hoy + pd.Timedelta(days=1)
+        activo_esperado = f"recordings_{manana.strftime('%Y_%m_%d')}.dat"
+    return nombre_archivo == activo_esperado
+
+@st.cache_data(ttl=600, show_spinner=False)
 def listar_archivos_drive(forzar_refresco=False):
     """
     Lista los archivos recordings_YYYY_MM_DD.dat desde Google Drive (solo lectura).
     Utiliza caché local en disco para arranque instantáneo (0 ms).
-    Se refresca automáticamente cada ~50 segundos para detectar nuevos archivos.
+    Caché de 10 minutos para evitar escaneos pesados y no ser bloqueado por Google Drive.
     """
     if INDEX_FILE.exists() and not forzar_refresco:
         edad = time.time() - INDEX_FILE.stat().st_mtime
-        if edad < 50:
+        if edad < 600:
             try:
                 with open(INDEX_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -371,9 +388,9 @@ def monitor_drive_inteligente(archivo_info, es_dia_activo=True):
     """
     Fragmento aislado que se ejecuta cada 60 segundos en segundo plano.
     Verifica mediante HTTP HEAD si el archivo de la estación en Google Drive
-    ha cambiado de tamaño o fecha de modificación.
+    ha cambiado de tamaño o fecha de modificación (la estación sube cada 5 min).
     - Si no cambió: la interfaz NO parpadea ni recarga nada (0% CPU / gráficos).
-    - Si cambió: limpia la caché y recarga la app completa (st.rerun()).
+    - Si cambió: limpia la caché de datos y recarga la app (st.rerun()).
     """
     if not archivo_info or not archivo_info.get("id"):
         st.caption("ℹ️ Sin archivo activo para monitoreo.")
@@ -395,7 +412,7 @@ def monitor_drive_inteligente(archivo_info, es_dia_activo=True):
             if last_size is None and last_mod is None:
                 # Inicialización en la primera carga
                 st.session_state[sig_key] = (curr_size, curr_mod)
-                st.caption(f"🟢 **Sincronizado:** `{nombre}` ({hora_str}) — Sin cambios.")
+                st.caption(f"🟢 **Sincronizado cada 5 min:** `{nombre}` ({hora_str}) — Al día.")
             elif (curr_size != last_size) or (curr_mod != last_mod):
                 # ¡Cambio detectado en Google Drive!
                 st.session_state[sig_key] = (curr_size, curr_mod)
@@ -406,42 +423,41 @@ def monitor_drive_inteligente(archivo_info, es_dia_activo=True):
                         destino.unlink()
                     except Exception:
                         pass
-                st.cache_data.clear()
+                # Solo limpiar la caché de datos de la página, NO el catálogo general de Drive
+                cargar_datos_dia_local.clear()
                 if es_dia_activo:
                     st.info(f"🔄 **Nuevos datos en Drive:** {curr_size} bytes ({hora_str}). Actualizando...")
                     st.rerun()
                 else:
-                    st.toast(f"Nuevos datos detectados en Drive para {nombre}", icon="🌦️")
+                    st.toast(f"Nuevos datos en Drive para {nombre}", icon="🌦️")
             else:
                 # No hay cambios: no hacer rerun
-                st.caption(f"🟢 **Drive al día:** `{nombre}` sin cambios ({hora_str}).")
+                st.caption(f"🟢 **Drive al día:** `{nombre}` ({hora_str}) — Sin cambios.")
         else:
             st.caption(f"🟡 **Drive:** Verificando cabeceras ({hora_str})...")
 
 def obtener_bytes_archivo(file_info, forzar_recarga=False):
     """
     Obtiene los bytes de un archivo .dat mediante descarga de SOLO LECTURA desde Drive.
-    - Los archivos de días pasados cerrados (> 2 días) se leen directamente del disco (0 ms).
-    - Los archivos recientes (de hoy y ayer en UTC) se refrescan si tienen más de 50 s.
+    - Los archivos cerrados/históricos se leen directamente del disco local (0 ms).
+    - El archivo activo (actualizado cada 5 min por la estación) se refresca desde Drive
+      si han pasado más de 4 minutos o si el monitor inteligente detectó un cambio.
     - Los datos en Google Drive NUNCA se alteran ni modifican.
     """
     nombre = file_info["nombre"]
     file_id = file_info["id"]
-    fecha_archivo = pd.to_datetime(file_info["fecha"]).date()
     destino = CACHE_DIR / nombre
 
-    hoy_utc = pd.Timestamp.now(tz="UTC").date()
-    # Archivo reciente: puede recibir nuevos datos de la estación en vivo
-    es_archivo_reciente = (fecha_archivo >= hoy_utc - pd.Timedelta(days=1))
+    activo = es_archivo_activo(nombre)
 
-    # 1. Si ya existe y es del pasado cerrado (> 1 día), nunca cambia
-    if destino.exists() and destino.stat().st_size > 0 and not es_archivo_reciente and not forzar_recarga:
+    # 1. Si ya existe en disco y NO es el archivo activo, es 100% estático (0 ms)
+    if destino.exists() and destino.stat().st_size > 0 and not activo and not forzar_recarga:
         return destino.read_bytes()
 
-    # 2. Si es archivo reciente, reutilizar si fue descargado hace menos de 50 s
-    if destino.exists() and es_archivo_reciente and not forzar_recarga:
+    # 2. Si es archivo activo, reutilizar disco si fue descargado hace menos de 4 minutos (240s)
+    if destino.exists() and activo and not forzar_recarga:
         edad = time.time() - destino.stat().st_mtime
-        if edad < 50:
+        if edad < 240:
             return destino.read_bytes()
 
     # 3. Descargar actualización (solo lectura) desde Drive
@@ -463,7 +479,7 @@ def obtener_bytes_archivo(file_info, forzar_recarga=False):
 # RECONSTRUCCIÓN DEL DÍA LOCAL COMPLETO (SOLUCIÓN CORTE 6 PM)
 # ==========================================================
 
-@st.cache_data(ttl=50)
+@st.cache_data(ttl=180, show_spinner=False)
 def cargar_datos_dia_local(fecha_str, archivos_dict, forzar_recarga=False):
     """
     Reconstruye las 24 horas del día seleccionado en El Salvador (UTC-6).
@@ -530,7 +546,7 @@ def cargar_datos_dia_local(fecha_str, archivos_dict, forzar_recarga=False):
             lambda r: calcular_punto_rocio_magnus(r["mcp9808"], r["hum_hum"]), axis=1
         )
 
-    # Control de lluvia y balance de vuelcos
+    # Control de lluvia y balance de precipitación
     if "tipping" in df.columns:
         s_tip = pd.to_numeric(df["tipping"], errors="coerce")
         s_tip.loc[s_tip < 0] = np.nan
@@ -538,7 +554,8 @@ def cargar_datos_dia_local(fecha_str, archivos_dict, forzar_recarga=False):
         tip_diff.loc[tip_diff < 0] = 0
         tip_diff.loc[tip_diff > 50] = 0  # Umbral de seguridad contra saltos artificiales
         df["tipping_diff"] = tip_diff
-        df["PP_Calculada"] = df["tipping_diff"] * 0.2
+        # El valor registrado en 'tipping' ya es la precipitación en mm (vuelcos × 0.2 mm)
+        df["PP_Calculada"] = df["tipping_diff"]
         df["Es_Lluvia_Real"] = df.apply(evaluar_control_calidad_lluvia, axis=1)
         df["PP_Plot"] = df.apply(lambda r: r["PP_Calculada"] if r["Es_Lluvia_Real"] else 0.0, axis=1)
 
@@ -733,12 +750,34 @@ if not archivos_drive:
     st.stop()
 
 archivos_dict = {x["nombre"]: x for x in archivos_drive}
-fechas_disponibles = sorted(list(set(x["fecha"] for x in archivos_drive)), reverse=True)
 
 # Cálculo de fechas de referencia local (UTC - 6h)
 ahora_local = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=6)
 hoy_local = ahora_local.date()
 ayer_local = hoy_local - pd.Timedelta(days=1)
+hora_local = ahora_local.hour
+
+# Detección inteligente del corte de las 18:00 (6:00 PM):
+# A las 18:00 local, la estación crea el archivo de mañana UTC (hoy_local + 1).
+# Si son las 18:00 o más y aún no está en el índice, forzar refresco del índice una sola vez.
+file_next_hoy = f"recordings_{(hoy_local + pd.Timedelta(days=1)).strftime('%Y_%m_%d')}.dat"
+if hora_local >= 18 and file_next_hoy not in archivos_dict:
+    try:
+        archivos_drive = listar_archivos_drive(forzar_refresco=True)
+        archivos_dict = {x["nombre"]: x for x in archivos_drive}
+    except Exception:
+        pass
+
+# Filtrar fechas disponibles: ÚNICAMENTE fechas hasta hoy local (nunca fechas de mañana).
+# El archivo recordings_(hoy+1).dat que se crea en la noche pertenece al bloque nocturno
+# de HOY (18:00 a 23:59), no a un día de mañana seleccionable.
+fechas_disponibles = sorted(
+    list(set(x["fecha"] for x in archivos_drive if pd.to_datetime(x["fecha"]).date() <= hoy_local)),
+    reverse=True,
+)
+
+if not fechas_disponibles:
+    fechas_disponibles = sorted(list(set(x["fecha"] for x in archivos_drive)), reverse=True)
 
 def formatear_fecha_opcion(fecha_val):
     if isinstance(fecha_val, str) and ("📅" in fecha_val or "/" in fecha_val):
@@ -781,20 +820,27 @@ tiene_bloque_noche = file_next_name in archivos_dict
 
 if tiene_bloque_noche:
     st.caption(f"🔗 **Reconstrucción 24h unificada:** 00:00–17:59 (`{file_curr_name}`) + 18:00–23:59 (`{file_next_name}`).")
-    archivo_monitoreado = archivos_dict.get(file_next_name)
 else:
     st.caption(f"🔗 **Día en curso:** 00:00–17:59 (`{file_curr_name}`). El bloque nocturno 18:00+ se unificará automáticamente al iniciar `{file_next_name}`.")
-    archivo_monitoreado = archivos_dict.get(file_curr_name)
 
-if not archivo_monitoreado and archivos_drive:
-    archivos_ordenados = sorted(archivos_drive, key=lambda x: x["fecha"], reverse=True)
-    archivo_monitoreado = archivos_ordenados[0]
+# Determinación precisa del archivo activo a monitorear:
+# Solo monitoreamos en vivo si el usuario está viendo el día de HOY.
+if target_date == hoy_local:
+    if hora_local >= 18 and tiene_bloque_noche:
+        archivo_monitoreado = archivos_dict.get(file_next_name)
+    else:
+        archivo_monitoreado = archivos_dict.get(file_curr_name)
+else:
+    archivo_monitoreado = None
 
 with st.sidebar:
     st.markdown("---")
     st.markdown("**📡 Sincronización Inteligente**")
-    st.caption("Verifica cada 60 s en Drive (HEAD) si el archivo cambió. Solo recarga si hay datos nuevos.")
-    monitor_drive_inteligente(archivo_monitoreado, es_dia_activo=(target_date == hoy_local))
+    if target_date == hoy_local and archivo_monitoreado:
+        st.caption("Verifica cada 60 s en Drive (HEAD) si el archivo cambió (la estación sube cada 5 min).")
+        monitor_drive_inteligente(archivo_monitoreado, es_dia_activo=True)
+    else:
+        st.caption("📁 **Día histórico consolidado:** Registros cerrados leídos de disco local (0 ms).")
 
 with st.spinner("Cargando y procesando datos meteorológicos..."):
     df = cargar_datos_dia_local(fecha_iso, archivos_dict)
@@ -910,7 +956,14 @@ with tabs[5]:
     if "tipping" in df.columns:
         df_qc = df.copy()
         aplicar_qc = st.checkbox("Activar filtro heurístico de lluvia", value=True)
-        factor = st.number_input("Factor de conversión (mm por vuelco)", min_value=0.001, value=0.2, step=0.001, format="%.3f")
+        factor = st.number_input(
+            "Factor de calibración / ajuste",
+            min_value=0.001,
+            value=1.000,
+            step=0.05,
+            format="%.3f",
+            help="El sensor ya registra directamente la precipitación en mm (vuelcos × 0.2 mm). Use 1.000 salvo que requiera ajuste fino de calibración.",
+        )
 
         df_qc["PP_Calculada"] = df_qc["tipping_diff"] * factor
 
