@@ -749,7 +749,7 @@ def grafico_viento(df):
 # INTERFAZ PRINCIPAL
 # ==========================================================
 
-st.title("🌦️ Estación Meteorológica — El Salvador")
+st.title("🌦️ 3D Paws — El Salvador")
 st.caption("Visualización y Control de Calidad Meteorológico (Zona Horaria El Salvador GMT-6 / UTC-6)")
 
 # Barra lateral para control de sincronización
