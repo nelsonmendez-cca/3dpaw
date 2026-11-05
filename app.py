@@ -580,8 +580,9 @@ def cargar_datos_dia_local(fecha_str, archivos_dict, forzar_recarga=False):
         df["tipping_diff"] = tip_diff
         # El valor registrado en 'tipping' ya es la precipitación en mm (vuelcos × 0.2 mm)
         df["PP_Calculada"] = df["tipping_diff"]
-        df["Es_Lluvia_Real"] = df.apply(evaluar_control_calidad_lluvia, axis=1)
-        df["PP_Plot"] = df.apply(lambda r: r["PP_Calculada"] if r["Es_Lluvia_Real"] else 0.0, axis=1)
+        # Filtro heurístico desactivado: la precipitación registrada se toma directamente
+        df["Es_Lluvia_Real"] = True
+        df["PP_Plot"] = df["PP_Calculada"]
 
     return df
 
@@ -953,7 +954,7 @@ with tabs[3]:
     cols_luz = [c for c in ["vis_light", "uv_light", "ir_light"] if c in df.columns]
     etiquetas_luz = ["Luz Visible", "Radiación UV", "Infrarrojo"]
     if cols_luz:
-        st.pyplot(grafico_linea(df, cols_luz, etiquetas_luz[:len(cols_luz)], "Sensores de Radiación e Irradiancia", "Nivel / Cuentas", fecha_iso))
+        st.pyplot(grafico_linea(df, cols_luz, etiquetas_luz[:len(cols_luz)], "Sensores de Radiación e Irradiancia", "Cuentas (u.a.)", fecha_iso))
     else:
         st.warning("No se encontraron registros de radiación.")
 
@@ -979,7 +980,7 @@ with tabs[5]:
 
     if "tipping" in df.columns:
         df_qc = df.copy()
-        aplicar_qc = st.checkbox("Activar filtro heurístico de lluvia", value=True)
+        aplicar_qc = st.checkbox("Activar filtro heurístico de lluvia", value=False)
         factor = st.number_input(
             "Factor de calibración / ajuste",
             min_value=0.001,
@@ -1015,7 +1016,7 @@ with tabs[5]:
             if aplicar_qc and total_ficticio > 0:
                 ax.bar(df_qc["fecha_hora"], df_qc["PP_Ficticia"], width=0.005, color="tab:red", label="Lluvia Ficticia (Descartada)")
 
-            ax.set_title("Intensidad de Precipitación (mm)")
+            ax.set_title("Lluvia registrada")
             ax.set_xlabel("Hora local")
             ax.set_ylabel("Precipitación (mm)")
             ax.legend()
