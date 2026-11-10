@@ -48,10 +48,10 @@ def evaluar_control_calidad_lluvia(row):
     if pd.isna(pp) or pp <= 0:
         return False
 
-    rh = row.get("hum_hum", np.nan)
+    rh = row.get("htu_hum", row.get("hum_hum", np.nan))
     temp = row.get("mcp9808", np.nan)
     dp = row.get("punto_rocio", np.nan)
-    bp = row.get("bmp_pres", 1013.25)
+    bp = row.get("bmp2_pres", row.get("bmp_pres", 1013.25))
     bp_ref = 1013.25
 
     if pd.isna(rh) or pd.isna(temp) or pd.isna(dp):
@@ -190,9 +190,9 @@ def calcular_balance_hidrico(
 
     # —— Penman-Monteith FAO-56 ——
     et0_pm = np.nan
-    hum_col = "hum_hum" if "hum_hum" in df.columns else None
+    hum_col = "htu_hum" if "htu_hum" in df.columns else ("hum_hum" if "hum_hum" in df.columns else None)
     wind_col = "wind_speed" if "wind_speed" in df.columns else None
-    pres_col = "bmp_pres" if "bmp_pres" in df.columns else None
+    pres_col = "bmp2_pres" if "bmp2_pres" in df.columns else ("bmp_pres" if "bmp_pres" in df.columns else None)
     if all(c is not None for c in [hum_col, wind_col, pres_col]):
         rh_mean = float(pd.to_numeric(df[hum_col], errors="coerce").mean())
         u2_mean = float(pd.to_numeric(df[wind_col], errors="coerce").mean())
@@ -565,9 +565,10 @@ def cargar_datos_dia_local(fecha_str, archivos_dict, forzar_recarga=False):
         return df
 
     # Calcular punto de rocío
-    if "mcp9808" in df.columns and "hum_hum" in df.columns:
+    hum_col_dp = "htu_hum" if "htu_hum" in df.columns else ("hum_hum" if "hum_hum" in df.columns else None)
+    if "mcp9808" in df.columns and hum_col_dp:
         df["punto_rocio"] = df.apply(
-            lambda r: calcular_punto_rocio_magnus(r["mcp9808"], r["hum_hum"]), axis=1
+            lambda r: calcular_punto_rocio_magnus(r["mcp9808"], r[hum_col_dp]), axis=1
         )
 
     # Control de lluvia y balance de precipitación
@@ -933,9 +934,10 @@ with tabs[0]:
             c3.metric("Máxima ", f"{t_ser.max():.1f} °C")
 
 with tabs[1]:
-    if "hum_hum" in df.columns:
-        st.pyplot(grafico_linea(df, ["hum_hum"], ["Humedad Relativa"], "Humedad Relativa (%)", "Humedad (%)", fecha_iso))
-        h_ser = df["hum_hum"].dropna()
+    col_hum = "htu_hum" if "htu_hum" in df.columns else ("hum_hum" if "hum_hum" in df.columns else None)
+    if col_hum:
+        st.pyplot(grafico_linea(df, [col_hum], ["Humedad Relativa"], "Humedad Relativa (%)", "Humedad (%)", fecha_iso))
+        h_ser = df[col_hum].dropna()
         if not h_ser.empty:
             c1, c2, c3 = st.columns(3)
             c1.metric("Humedad Media", f"{h_ser.mean():.1f} %")
@@ -945,8 +947,9 @@ with tabs[1]:
         st.warning("No se encontró el registro de humedad.")
 
 with tabs[2]:
-    if "bmp_pres" in df.columns:
-        st.pyplot(grafico_linea(df, ["bmp_pres"], ["Presión Atmosférica"], "Presión Atmosférica (hPa)", "Presión (hPa)", fecha_iso))
+    col_pres = "bmp2_pres" if "bmp2_pres" in df.columns else ("bmp_pres" if "bmp_pres" in df.columns else None)
+    if col_pres:
+        st.pyplot(grafico_linea(df, [col_pres], ["Presión Atmosférica"], "Presión Atmosférica (hPa)", "Presión (hPa)", fecha_iso))
     else:
         st.warning("No se encontró el registro de presión.")
 
@@ -1032,8 +1035,9 @@ with tabs[6]:
 
     # Detección inteligente de elevación a partir de los datos del sensor barométrico/altimétrico
     elev_default = ELEVACION_ESTACION
-    if "bmp_alt" in df.columns:
-        alt_val = pd.to_numeric(df["bmp_alt"], errors="coerce").dropna()
+    col_alt = "bmp2_alt" if "bmp2_alt" in df.columns else ("bmp_alt" if "bmp_alt" in df.columns else None)
+    if col_alt:
+        alt_val = pd.to_numeric(df[col_alt], errors="coerce").dropna()
         if not alt_val.empty and alt_val.median() > 0:
             elev_default = int(round(alt_val.median()))
 
